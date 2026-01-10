@@ -18,3 +18,5 @@ mariadb_root_password = "strong_db_password" #change it later
 mongo_username = "admin"
 mongo_password = "strong_db_password" #change it later
 redis_password = "cache_pass" #change it later
+kube_config_path = "kube_config_path" #change it later
+namespaces = ["default", "kube-system"] #change it later

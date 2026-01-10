@@ -13,7 +13,6 @@ variable "server_ips" {
 variable "k3s_default_namespace" {
   description = "Name of the K3S default namespace"
   type        = string
-  sensitive   = true
 }
 
 variable "ssh_username" {
