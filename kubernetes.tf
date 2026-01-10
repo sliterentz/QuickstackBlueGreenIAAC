@@ -1,11 +1,13 @@
 # Create namespaces
 resource "kubernetes_namespace" "blue" {
+  depends_on = [null_resource.wait_for_cluster]
   metadata {
     name = "${var.k3s_default_namespace}-blue"
   }
 }
 
 resource "kubernetes_namespace" "green" {
+  depends_on = [null_resource.wait_for_cluster]
   metadata {
     name = "${var.k3s_default_namespace}-green"
   }

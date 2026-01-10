@@ -24,65 +24,36 @@ This repository contains Terraform configurations to quickly deploy a K3s Kubern
 
 ## Quick Start
 
-### 1. Prepare Your Environment
+### 1. Prepare Host Environment
 
-Ensure you have a server with SSH access where you want to deploy K3s. This server should have:
-- At least 2 CPU cores
-- 4GB RAM minimum (8GB recommended)
-- 20GB available disk space
-- Public IP address
-- SSH access with key-based authentication
-
-### 2. Clone the Repository
+Pastikan host machine Anda (Ubuntu/Debian) sudah terkonfigurasi untuk menjalankan KVM. Gunakan script yang tersedia di modul `terraform-kvm-ubuntu`:
 
 ```bash
-git clone https://github.com/yourusername/myterra.git
-cd myterra
+cd terraform-kvm-ubuntu
+chmod +x setup_kvm.sh
+./setup_kvm.sh
 ```
 
-### 3. Configure Variables
+### 2. Configure Variables
+
+Edit `terraform.tfvars`. Perhatikan bahwa sekarang Anda tidak perlu memasukkan `server_ips` secara manual karena VM akan dibuat secara otomatis di KVM lokal.
+
 ```bash
 cp example.tfvars terraform.tfvars
 ```
 
-Edit terraform.tfvars with your specific configuration:
-```
-server_ips            = ["YOUR_SERVER_IP"]  # Public IP of your server
-ssh_username          = "YOUR_USERNAME"     # SSH username
-ssh_private_key_path  = "~/.ssh/id_rsa"     # Path to your SSH private key
-k3s_default_namespace = "kube-system"       # Default namespace
-argocd_hostname       = "argocd.yourdomain.com"  # ArgoCD hostname
-argocd_admin_password = "YOUR_SECURE_PASSWORD"   # ArgoCD admin password
-argocd_tls_secret_name = "argocd-tls"       # TLS secret name
-# Database configurations
-postgres_database = "app_db"
-postgres_root_password = "secure_postgres_root_password"
-postgres_username = "app_user"
-postgres_password = "secure_postgres_password"
-mariadb_database = "app_db"
-mariadb_username = "app_user"
-mariadb_password = "secure_mariadb_password"
-mariadb_root_password = "secure_mariadb_root_password"
-mongo_username = "admin"
-mongo_password = "secure_mongo_password"
-redis_password = "secure_redis_password"
-```
+### 3. Deploy Infrastructure
 
-### 4. Initialize Terraform
 ```bash
 terraform init
+terraform apply -auto-approve
 ```
 
-### 5. Validate the Terraform Files
-```bash
-terraform validate
-```
-
-### 6. Deploy the Infrastructure
-```bash
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
-```
+Terraform akan:
+1. Membuat VM di KVM (Ubuntu 22.04, 2 CPU, 4GB RAM, 20GB Disk).
+2. Menginstall K3s secara otomatis di dalam VM via Cloud-Init.
+3. Mengambil file `kubeconfig` dari VM ke host local secara otomatis.
+4. Menginstall Metrics Server dan komponen Kubernetes lainnya.
 
 ### 7. Access Your Cluster (Root Access)
 ```bash

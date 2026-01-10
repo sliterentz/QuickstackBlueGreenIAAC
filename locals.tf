@@ -5,7 +5,7 @@ locals {
   # Database configurations
   databases = {
     postgres = {
-      image = "postgres:latest"
+      image = "postgres:16-alpine"
       port = 5432
       storage_size = "2Gi"
       db_name = "${var.postgres_database}"

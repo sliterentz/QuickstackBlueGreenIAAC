@@ -1,6 +1,7 @@
 # PostgreSQL StatefulSet for both environments
 resource "kubernetes_stateful_set" "postgres" {
   for_each = toset(local.namespaces)
+  wait_for_rollout = false
   
   metadata {
     name      = "postgres"
@@ -60,6 +61,17 @@ resource "kubernetes_stateful_set" "postgres" {
           
           port {
             container_port = local.databases.postgres.port
+          }
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
           }
           
           volume_mount {
@@ -124,6 +136,7 @@ resource "kubernetes_stateful_set" "postgres" {
 # MariaDB StatefulSet for both environments
 resource "kubernetes_stateful_set" "mariadb" {
   for_each = toset(local.namespaces)
+  wait_for_rollout = false
   
   metadata {
     name      = "mariadb"
@@ -242,6 +255,7 @@ resource "kubernetes_stateful_set" "mariadb" {
 # MongoDB StatefulSet for both environments
 resource "kubernetes_stateful_set" "mongodb" {
   for_each = toset(local.namespaces)
+  wait_for_rollout = false
   
   metadata {
     name      = "mongodb"
@@ -320,6 +334,7 @@ resource "kubernetes_stateful_set" "mongodb" {
 # Redis StatefulSet for both environments
 resource "kubernetes_stateful_set" "redis" {
   for_each = toset(local.namespaces)
+  wait_for_rollout = false
   
   metadata {
     name      = "redis"
