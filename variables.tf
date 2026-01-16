@@ -1,119 +1,377 @@
-# Variables for the Terraform configuration
-
-variable "kube_config_path" {
-  description = "Path to the kubeconfig file"
-  type        = string
-}
-
+# ============================================
+# Server Configuration Variables
+# ============================================
 variable "server_ips" {
-  description = "List of server IPs for K3S cluster"
+  description = "List of server IP addresses untuk K3s cluster"
   type        = list(string)
 }
 
-variable "k3s_default_namespace" {
-  description = "Name of the K3S default namespace"
-  type        = string
-}
-
 variable "ssh_username" {
-  description = "SSH username for server access"
+  description = "Username untuk SSH ke server"
   type        = string
+  default     = "ubuntu"
 }
 
 variable "ssh_private_key_path" {
-  description = "Path to SSH private key"
+  description = "Path ke SSH private key"
   type        = string
 }
 
-variable "argocd_version" {
-  description = "Version of ArgoCD to install"
+variable "kube_config_path" {
+  description = "Path untuk menyimpan kubeconfig file"
   type        = string
-  default     = "5.34.6"
+  default     = "kubeconfig"
 }
 
+# ============================================
+# K3s Configuration Variables
+# ============================================
+variable "k3s_default_namespace" {
+  description = "Default namespace untuk K3s resources"
+  type        = string
+  default     = "kube-system"
+}
+
+variable "k3s_version" {
+  description = "Versi K3s yang akan diinstall"
+  type        = string
+  default     = "v1.31.0+k3s1"
+}
+
+variable "k3s_node_role" {
+  description = "Role K3s node: server atau agent"
+  type        = string
+  default     = "server"
+  validation {
+    condition     = contains(["server", "agent"], var.k3s_node_role)
+    error_message = "Node role harus 'server' atau 'agent'."
+  }
+}
+
+variable "k3s_server_url" {
+  description = "URL K3s server untuk agent nodes"
+  type        = string
+  default     = ""
+}
+
+variable "k3s_token" {
+  description = "Token untuk K3s cluster"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# ============================================
+# ArgoCD Configuration Variables
+# ============================================
 variable "argocd_hostname" {
-  description = "Hostname for ArgoCD"
+  description = "Hostname untuk ArgoCD server"
   type        = string
 }
 
 variable "argocd_admin_password" {
-  description = "Admin password for ArgoCD"
+  description = "Password untuk ArgoCD admin user"
   type        = string
   sensitive   = true
 }
 
 variable "argocd_tls_secret_name" {
-  description = "Name of the TLS secret for ArgoCD ingress"
+  description = "Nama secret untuk TLS certificate ArgoCD"
   type        = string
+  default     = "argocd-tls-secret"
 }
 
+variable "argocd_version" {
+  description = "Versi Helm Chart ArgoCD"
+  type        = string
+  default     = "7.3.4"
+}
+
+# ============================================
+# PostgreSQL Configuration Variables
+# ============================================
 variable "postgres_database" {
-  description = "PostgreSQL database name"
+  description = "Nama database PostgreSQL"
   type        = string
-}
-
-variable "postgres_username" {
-  description = "PostgreSQL username"
-  type        = string
-  sensitive   = true
 }
 
 variable "postgres_root_password" {
-  description = "PostgreSQL root password"
+  description = "Root password untuk PostgreSQL"
   type        = string
   sensitive   = true
+}
+
+variable "postgres_username" {
+  description = "Username untuk PostgreSQL"
+  type        = string
 }
 
 variable "postgres_password" {
-  description = "PostgreSQL password"
+  description = "Password untuk PostgreSQL user"
   type        = string
   sensitive   = true
 }
 
+# ============================================
+# MariaDB Configuration Variables
+# ============================================
 variable "mariadb_database" {
-  description = "Mariadb database name"
+  description = "Nama database MariaDB"
   type        = string
 }
 
 variable "mariadb_username" {
-  description = "Mariadb username"
+  description = "Username untuk MariaDB"
+  type        = string
+}
+
+variable "mariadb_password" {
+  description = "Password untuk MariaDB user"
   type        = string
   sensitive   = true
 }
 
 variable "mariadb_root_password" {
-  description = "Mariadb root password"
+  description = "Root password untuk MariaDB"
   type        = string
   sensitive   = true
 }
 
-variable "mariadb_password" {
-  description = "Mariadb password"
-  type        = string
-  sensitive   = true
-}
-
-
+# ============================================
+# MongoDB Configuration Variables
+# ============================================
 variable "mongo_username" {
-  description = "MongoDB Admin username"
+  description = "Username untuk MongoDB admin"
   type        = string
-  sensitive   = true
 }
 
 variable "mongo_password" {
-  description = "MongoDB root password"
+  description = "Password untuk MongoDB admin"
   type        = string
   sensitive   = true
 }
 
+# ============================================
+# Redis Configuration Variables
+# ============================================
 variable "redis_password" {
-  description = "Redis password"
+  description = "Password untuk Redis"
   type        = string
   sensitive   = true
 }
 
-variable "environment" {
-  description = "Environment (dev or prod)"
+# ============================================
+# N8N Configuration Variables
+# ============================================
+variable "enable_blue_environment" {
+  description = "Enable Blue environment deployment"
+  type        = bool
+  default     = false
+}
+
+variable "n8n_namespace" {
+  description = "Namespace for n8n deployment"
   type        = string
-  default     = "prod"
+  default     = "n8n"
+}
+
+variable "n8n_hostname" {
+  description = "Hostname untuk N8N instance"
+  type        = string
+}
+
+variable "n8n_encryption_key" {
+  description = "Encryption key untuk N8N"
+  type        = string
+  sensitive   = true
+}
+
+variable "n8n_db_host" {
+  description = "Database host untuk N8N"
+  type        = string
+  default     = ""
+}
+
+variable "n8n_db_name" {
+  description = "PostgreSQL database name for n8n"
+  type        = string
+  default     = "n8n"
+}
+
+variable "n8n_db_user" {
+  description = "Database user untuk N8N"
+  type        = string
+}
+
+variable "n8n_db_password" {
+  description = "Database password untuk N8N"
+  type        = string
+  sensitive   = true
+}
+
+variable "n8n_storage_size" {
+  description = "Storage size for n8n data"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "n8n_replicas" {
+  description = "Number of n8n replicas"
+  type        = number
+  default     = 1
+}
+
+variable "n8n_hpa_min_replicas" {
+  description = "Minimum replicas for HPA"
+  type        = number
+  default     = 1
+}
+
+variable "n8n_hpa_max_replicas" {
+  description = "Maximum replicas for HPA"
+  type        = number
+  default     = 2
+}
+
+# ============================================
+# General Configuration Variables
+# ============================================
+variable "GENERIC_TIMEZONE" {
+  description = "Timezone untuk aplikasi"
+  type        = string
+  default     = "Asia/Jakarta"
+}
+
+# ============================================
+# VM Configuration Variables (KVM/Libvirt)
+# ============================================
+variable "vm_hostname" {
+  description = "Hostname untuk VM"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.vm_hostname))
+    error_message = "Hostname must be a valid DNS name (lowercase alphanumeric and hyphens only)"
+  }
+}
+
+variable "vm_memory" {
+  description = "Memory VM dalam MB"
+  type        = number
+  default     = 4096
+}
+
+variable "vm_vcpu" {
+  description = "Jumlah vCPU"
+  type        = number
+  default     = 2
+}
+
+variable "vm_disk_size" {
+  description = "Ukuran disk VM dalam bytes"
+  type        = number
+  default     = 21474836480 # 20GB
+}
+
+variable "network_name" {
+  description = "Nama network libvirt"
+  type        = string
+  default     = "default"
+}
+
+variable "vm_ip_address" {
+  description = "Static IP address untuk VM (format: 192.168.122.10/24)"
+  type        = string
+  default     = ""
+}
+
+variable "vm_mac_address" {
+  description = "MAC address untuk VM network interface (kosong untuk auto-generate)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.vm_mac_address == "" || can(regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", var.vm_mac_address))
+    error_message = "MAC address must be in format XX:XX:XX:XX:XX:XX or empty for auto-generation"
+  }
+}
+
+variable "vm_gateway" {
+  description = "Gateway IP address"
+  type        = string
+  default     = ""
+}
+
+variable "vm_nameservers" {
+  description = "DNS nameservers"
+  type        = list(string)
+  default     = ["8.8.8.8", "8.8.4.4"]
+}
+
+variable "libvirt_pool_name" {
+  description = "Name of the libvirt storage pool"
+  type        = string
+  default     = "k3s_infra_pool"
+}
+
+variable "ubuntu_img_url" {
+  description = "URL Ubuntu Cloud Image"
+  type        = string
+  default     = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+}
+
+variable "ssh_public_key" {
+  description = "SSH Public Key untuk akses VM"
+  type        = string
+  default     = ""
+}
+
+variable "enable_uefi" {
+  description = "Enable UEFI firmware (requires OVMF package)"
+  type        = bool
+  default     = false
+}
+
+variable "cpu_mode" {
+  description = "CPU mode (host-passthrough, host-model, or custom)"
+  type        = string
+  default     = "host-passthrough"
+
+  validation {
+    condition     = contains(["host-passthrough", "host-model", "custom"], var.cpu_mode)
+    error_message = "CPU mode must be one of: host-passthrough, host-model, custom"
+  }
+}
+
+variable "enable_qemu_agent" {
+  description = "Enable QEMU guest agent"
+  type        = bool
+  default     = true
+}
+
+variable "autostart" {
+  description = "Autostart VM on host boot"
+  type        = bool
+  default     = false
+}
+
+variable "video_type" {
+  description = "Video adapter type (virtio, qxl, vga)"
+  type        = string
+  default     = "virtio"
+
+  validation {
+    condition     = contains(["virtio", "qxl", "vga"], var.video_type)
+    error_message = "Video type must be one of: virtio, qxl, vga"
+  }
+}
+
+variable "libvirt_domain_type" {
+  description = "Domain type for libvirt (kvm or qemu). Use 'qemu' if nested virtualization is not available."
+  type        = string
+  default     = "kvm"
+  validation {
+    condition     = contains(["kvm", "qemu"], var.libvirt_domain_type)
+    error_message = "Domain type must be 'kvm' or 'qemu'."
+  }
 }

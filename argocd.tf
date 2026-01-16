@@ -2,9 +2,13 @@
 
 resource "kubernetes_namespace" "argocd" {
   depends_on = [null_resource.wait_for_cluster]
-  
+
   metadata {
     name = "argocd"
+  }
+
+  timeouts {
+    delete = "15m"
   }
 }
 
@@ -14,19 +18,130 @@ resource "helm_release" "argocd" {
   chart      = "argo-cd"
   namespace  = kubernetes_namespace.argocd.metadata[0].name
   version    = var.argocd_version
-  timeout    = 1200 # Naikkan timeout jadi 20 menit
-  
+  timeout    = 1800 # 30 menit
+  wait       = true
+
   values = [<<EOF
 server:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
   extraArgs:
     - --insecure
   ingress:
     enabled: false
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "1024Mi"
+  env:
+    - name: ARGOCD_EXEC_TIMEOUT
+      value: "180s"
+redis:
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+controller:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  # Optimasi concurrency
+  args:
+    statusProcessors: "20"
+    operationProcessors: "10"
 configs:
   secret:
     argocdServerAdminPassword: ${bcrypt(var.argocd_admin_password)}
+  cm:
+    # Tuning parameter
+    timeout.reconciliation: "180s"
+    timeout.hard.reconciliation: "0s"
+    resource.customizations.ignoreDifferences.all: |
+      jsonPointers:
+      - /status
 EOF
   ]
+}
+
+# HPA for ArgoCD Server
+resource "kubectl_manifest" "argocd_server_hpa" {
+  depends_on = [helm_release.argocd]
+  yaml_body  = <<YAML
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: argocd-server
+  namespace: ${kubernetes_namespace.argocd.metadata[0].name}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: argocd-server
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+YAML
+}
+
+# HPA for ArgoCD Repo Server
+resource "kubectl_manifest" "argocd_repo_server_hpa" {
+  depends_on = [helm_release.argocd]
+  yaml_body  = <<YAML
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: argocd-repo-server
+  namespace: ${kubernetes_namespace.argocd.metadata[0].name}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: argocd-repo-server
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+YAML
 }
 
 # Create self-signed TLS certificate for ArgoCD
@@ -69,7 +184,7 @@ resource "kubernetes_secret" "argocd_tls" {
 # Create ArgoCD ingress with Traefik
 resource "kubernetes_ingress_v1" "argocd_ingress" {
   depends_on = [helm_release.argocd, kubernetes_secret.argocd_tls]
-  
+
   metadata {
     name      = "argocd-server-ingress"
     namespace = kubernetes_namespace.argocd.metadata[0].name
@@ -78,10 +193,10 @@ resource "kubernetes_ingress_v1" "argocd_ingress" {
       "traefik.ingress.kubernetes.io/router.tls"         = "true"
     }
   }
-  
+
   spec {
     ingress_class_name = "traefik"
-    
+
     rule {
       host = var.argocd_hostname
       http {
@@ -99,7 +214,7 @@ resource "kubernetes_ingress_v1" "argocd_ingress" {
         }
       }
     }
-    
+
     tls {
       hosts       = [var.argocd_hostname]
       secret_name = var.argocd_tls_secret_name

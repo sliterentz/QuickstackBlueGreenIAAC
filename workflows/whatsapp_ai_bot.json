@@ -1,0 +1,207 @@
+{
+  "name": "Enterprise WhatsApp AI Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-webhook",
+        "options": {}
+      },
+      "name": "WhatsApp Webhook (Msg)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp-webhook",
+        "options": {}
+      },
+      "name": "WhatsApp Webhook (Verify)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        100,
+        100
+      ],
+      "notes": "Handles Meta's hub.challenge verification"
+    },
+    {
+      "parameters": {
+        "functionCode": "const query = items[0].json.query;\nconst mode = query['hub.mode'];\nconst token = query['hub.verify_token'];\nconst challenge = query['hub.challenge'];\n\nif (mode === 'subscribe' && token === $env.WHATSAPP_VERIFY_TOKEN) {\n  return [{json: {body: parseInt(challenge)}}];\n}\n\nthrow new Error('Verification failed');"
+      },
+      "name": "Verify Token",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        300,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.body.entry[0].changes[0].value.messages[0].type }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "text"
+            },
+            {
+              "value2": "image",
+              "output": 1
+            },
+            {
+              "value2": "audio",
+              "output": 2
+            }
+          ]
+        }
+      },
+      "name": "Switch Message Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4-turbo",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a helpful assistant for our business. Answer in the same language as the user."
+            },
+            {
+              "content": "={{ $json.body.entry[0].changes[0].value.messages[0].text.body }}"
+            }
+          ]
+        }
+      },
+      "name": "OpenAI Chat",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        600,
+        200
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "={{ $env.WHATSAPP_PHONE_NUMBER_ID }}",
+        "recipientPhoneNumber": "={{ $json.body.entry[0].changes[0].value.messages[0].from }}",
+        "textBody": "={{ $json.content }}"
+      },
+      "name": "WhatsApp Response",
+      "type": "n8n-nodes-base.whatsapp",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "whatsappApi": {
+          "id": "YOUR_WHATSAPP_CREDENTIAL_ID",
+          "name": "WhatsApp account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        100,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO error_logs (execution_id, error_message, timestamp) VALUES ($1, $2, NOW())",
+        "additionalFields": {
+          "queryParams": "={{ $json.execution.id }}, {{ $json.message }}"
+        }
+      },
+      "name": "Log Error to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        300,
+        600
+      ]
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook (Verify)": {
+      "main": [
+        [
+          {
+            "node": "Verify Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Webhook (Msg)": {
+      "main": [
+        [
+          {
+            "node": "Switch Message Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Message Type": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log Error to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

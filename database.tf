@@ -1,8 +1,8 @@
 # PostgreSQL StatefulSet for both environments
 resource "kubernetes_stateful_set" "postgres" {
-  for_each = toset(local.namespaces)
+  for_each         = toset(local.namespaces)
   wait_for_rollout = false
-  
+
   metadata {
     name      = "postgres"
     namespace = each.key
@@ -29,7 +29,7 @@ resource "kubernetes_stateful_set" "postgres" {
         container {
           name  = "postgres"
           image = local.databases.postgres.image
-          
+
           env {
             name = "POSTGRES_USER"
             value_from {
@@ -43,7 +43,7 @@ resource "kubernetes_stateful_set" "postgres" {
             name = "POSTGRES_PASSWORD"
             value_from {
               secret_key_ref {
-                name =  kubernetes_secret.postgres_secrets[each.key].metadata[0].name
+                name = kubernetes_secret.postgres_secrets[each.key].metadata[0].name
                 key  = "postgres-password"
               }
             }
@@ -52,28 +52,28 @@ resource "kubernetes_stateful_set" "postgres" {
             name  = "POSTGRES_DB"
             value = local.databases.postgres.db_name
           }
-          
+
           volume_mount {
             name       = "init-script"
             mount_path = "/docker-entrypoint-initdb.d"
             read_only  = true
           }
-          
+
           port {
             container_port = local.databases.postgres.port
           }
 
           resources {
             requests = {
-              cpu    = "100m"
-              memory = "128Mi"
+              cpu    = "20m"
+              memory = "32Mi"
             }
             limits = {
-              cpu    = "500m"
-              memory = "512Mi"
+              cpu    = "200m"
+              memory = "128Mi"
             }
           }
-          
+
           volume_mount {
             name       = "postgres-${each.key}-storage"
             mount_path = "/var/lib/postgresql/data"
@@ -100,7 +100,7 @@ resource "kubernetes_stateful_set" "postgres" {
             failure_threshold     = local.databases.postgres.probes.liveness.failure_threshold
           }
         }
-        
+
         volume {
           name = "init-script"
           config_map {
@@ -135,9 +135,9 @@ resource "kubernetes_stateful_set" "postgres" {
 
 # MariaDB StatefulSet for both environments
 resource "kubernetes_stateful_set" "mariadb" {
-  for_each = toset(local.namespaces)
+  for_each         = toset(local.namespaces)
   wait_for_rollout = false
-  
+
   metadata {
     name      = "mariadb"
     namespace = each.key
@@ -193,12 +193,23 @@ resource "kubernetes_stateful_set" "mariadb" {
             }
           }
           env {
-            name = "MYSQL_DATABASE"
+            name  = "MYSQL_DATABASE"
             value = local.databases.mariadb.db_name
           }
 
           port {
             container_port = local.databases.mariadb.port
+          }
+
+          resources {
+            requests = {
+              cpu    = "20m"
+              memory = "32Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
           }
 
           volume_mount {
@@ -254,9 +265,9 @@ resource "kubernetes_stateful_set" "mariadb" {
 
 # MongoDB StatefulSet for both environments
 resource "kubernetes_stateful_set" "mongodb" {
-  for_each = toset(local.namespaces)
+  for_each         = toset(local.namespaces)
   wait_for_rollout = false
-  
+
   metadata {
     name      = "mongodb"
     namespace = each.key
@@ -265,6 +276,13 @@ resource "kubernetes_stateful_set" "mongodb" {
   spec {
     service_name = "mongodb"
     replicas     = 1
+
+    update_strategy {
+      type = "RollingUpdate"
+      rolling_update {
+        partition = 0
+      }
+    }
 
     selector {
       match_labels = {
@@ -307,6 +325,17 @@ resource "kubernetes_stateful_set" "mongodb" {
             container_port = local.databases.mongodb.port
           }
 
+          resources {
+            requests = {
+              cpu    = "20m"
+              memory = "32Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+
           volume_mount {
             name       = "mongodb-${each.key}-storage"
             mount_path = "/data/db"
@@ -333,9 +362,9 @@ resource "kubernetes_stateful_set" "mongodb" {
 
 # Redis StatefulSet for both environments
 resource "kubernetes_stateful_set" "redis" {
-  for_each = toset(local.namespaces)
+  for_each         = toset(local.namespaces)
   wait_for_rollout = false
-  
+
   metadata {
     name      = "redis"
     namespace = each.key
@@ -367,16 +396,27 @@ resource "kubernetes_stateful_set" "redis" {
             container_port = local.databases.redis.port
           }
 
+          resources {
+            requests = {
+              cpu    = "20m"
+              memory = "32Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+
           volume_mount {
             name       = "redis-${each.key}-storage"
             mount_path = "/data"
           }
 
           args = [
-            "--requirepass", 
+            "--requirepass",
             "$(REDIS_PASSWORD)"
           ]
-          
+
           env {
             name = "REDIS_PASSWORD"
             value_from {
@@ -386,7 +426,7 @@ resource "kubernetes_stateful_set" "redis" {
               }
             }
           }
-          
+
           readiness_probe {
             exec {
               command = local.databases.redis.probes.readiness.command
@@ -429,10 +469,10 @@ resource "kubernetes_stateful_set" "redis" {
 # Database Services for both environments
 resource "kubernetes_service" "database_services" {
   for_each = {
-    for pair in setproduct(local.namespaces, ["postgres", "mariadb", "mongodb", "redis"]) : 
+    for pair in setproduct(local.namespaces, ["postgres", "mariadb", "mongodb", "redis"]) :
     "${pair[0]}-${pair[1]}" => {
       namespace = pair[0]
-      db_type = pair[1]
+      db_type   = pair[1]
     }
   }
 
@@ -440,19 +480,19 @@ resource "kubernetes_service" "database_services" {
     name      = each.value.db_type
     namespace = each.value.namespace
   }
-  
+
   spec {
     selector = {
       app = each.value.db_type
     }
-    
+
     port {
       port        = local.databases[each.value.db_type].port
       target_port = local.databases[each.value.db_type].port
     }
   }
 
-  depends_on = [ 
+  depends_on = [
     kubernetes_namespace.blue,
     kubernetes_namespace.green
   ]

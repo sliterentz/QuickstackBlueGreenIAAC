@@ -7,7 +7,16 @@ Solusi ini dirancang untuk kompatibilitas tinggi, kemudahan penggunaan, dan siap
 ## 📋 Fitur Utama
 
 - **Otomatisasi Penuh**: Script setup untuk menyiapkan host environment.
-- **Ubuntu LTS Terbaru**: Mendukung Ubuntu 24.04 LTS (Noble Numbat) via Cloud Images.
+- **Ubuntu LTS Terbaru**: Menggunakan Ubuntu 24.04 LTS (Noble Numbat) via Cloud Images.
+- **Production-Ready K8s Prep**:
+    - Optimasi kernel (overlay, br_netfilter, sysctl tuning).
+    - Pre-installed Containerd (CRI), Kubeadm, Kubelet, dan Kubectl.
+    - Otomatis menonaktifkan Swap (persyaratan K8s).
+- **Hardening Keamanan**:
+    - Implementasi dasar CIS Benchmark.
+    - Konfigurasi SSH yang aman.
+    - Firewall (UFW) yang sudah terkonfigurasi untuk traffic Kubernetes.
+- **Monitoring Terintegrasi**: Pre-installed Prometheus Node Exporter (port 9100).
 - **Cloud-Init Integration**: Konfigurasi otomatis user, SSH keys, dan paket saat boot.
 - **Networking**: DHCP lease management otomatis via Libvirt.
 - **Modular**: Parameter CPU, RAM, dan Disk dapat dikonfigurasi via variabel.

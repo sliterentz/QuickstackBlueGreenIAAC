@@ -1,0 +1,394 @@
+# n8n Enterprise Architecture (Optimized)
+# Uses external Postgres (kube-system-green) and Redis (kube-system-blue)
+
+# 1. Secrets Management (Mirrored from external or provided via vars)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: n8n-secrets
+  namespace: ${namespace}
+type: Opaque
+stringData:
+  N8N_ENCRYPTION_KEY: "${n8n_encryption_key}"
+  DB_POSTGRESDB_PASSWORD: "${db_password}"
+  DB_POSTGRESDB_USER: "${db_user}"
+  DB_POSTGRESDB_DATABASE: "${db_name}"
+  # Redis password for external redis
+  REDIS_PASSWORD: "${redis_password}"
+
+---
+# 2. Persistent Volume Claims (Only for n8n data)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-storage
+  namespace: ${namespace}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${storage_size}
+
+---
+# 3. Traefik Middleware for Path Stripping
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: n8n-strip-prefix
+  namespace: ${namespace}
+spec:
+  stripPrefix:
+    prefixes:
+      - /n8n
+
+---
+# 4. n8n Main Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n-main
+  namespace: ${namespace}
+  labels:
+    app: n8n
+    component: main
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: n8n
+      component: main
+  template:
+    metadata:
+      labels:
+        app: n8n
+        component: main
+    spec:
+      containers:
+        - name: n8n
+          image: docker.n8n.io/n8nio/n8n:latest
+          ports:
+            - containerPort: 5678
+          env:
+            - name: N8N_HOST
+              value: "${n8n_hostname}"
+            - name: N8N_PORT
+              value: "5678"
+            - name: N8N_PROTOCOL
+              value: "https"
+            - name: N8N_PATH
+              value: "/n8n/"
+            - name: N8N_EDITOR_BASE_URL
+              value: "https://${n8n_hostname}/n8n/"
+            - name: WEBHOOK_URL
+              value: "https://${n8n_hostname}/n8n/"
+            - name: GENERIC_TIMEZONE
+              value: "${timezone}"
+            - name: EXECUTIONS_MODE
+              value: "queue"
+            - name: QUEUE_BULL_REDIS_HOST
+              value: "redis.kube-system-green.svc.cluster.local"
+            - name: QUEUE_BULL_REDIS_PORT
+              value: "6379"
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "postgres.kube-system-green.svc.cluster.local"
+            - name: DB_POSTGRESDB_PORT
+              value: "5432"
+            - name: DB_POSTGRESDB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_DATABASE
+            - name: DB_POSTGRESDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_USER
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_PASSWORD
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: N8N_ENCRYPTION_KEY
+          resources:
+            requests:
+              memory: "${resource_requests_memory}"
+              cpu: "${resource_requests_cpu}"
+            limits:
+              memory: "${resource_limits_memory}"
+              cpu: "${resource_limits_cpu}"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: n8n-storage
+
+---
+# 5. n8n Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n-worker
+  namespace: ${namespace}
+  labels:
+    app: n8n
+    component: worker
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      app: n8n
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: n8n
+        component: worker
+    spec:
+      containers:
+        - name: n8n
+          image: docker.n8n.io/n8nio/n8n:latest
+          command: ["n8n", "worker"]
+          env:
+            - name: GENERIC_TIMEZONE
+              value: "${timezone}"
+            - name: EXECUTIONS_MODE
+              value: "queue"
+            - name: QUEUE_BULL_REDIS_HOST
+              value: "redis.kube-system-green.svc.cluster.local"
+            - name: QUEUE_BULL_REDIS_PORT
+              value: "6379"
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "postgres.kube-system-green.svc.cluster.local"
+            - name: DB_POSTGRESDB_PORT
+              value: "5432"
+            - name: DB_POSTGRESDB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_DATABASE
+            - name: DB_POSTGRESDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_USER
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_PASSWORD
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: N8N_ENCRYPTION_KEY
+          resources:
+            requests:
+              memory: "${resource_requests_memory}"
+              cpu: "${resource_requests_cpu}"
+            limits:
+              memory: "${resource_limits_memory}"
+              cpu: "${resource_limits_cpu}"
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: n8n-storage
+
+---
+# 5b. Horizontal Pod Autoscaler for Worker
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: n8n-worker-hpa
+  namespace: ${namespace}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: n8n-worker
+  minReplicas: ${hpa_min_replicas}
+  maxReplicas: ${hpa_max_replicas}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# 6. n8n Webhook Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n-webhook
+  namespace: ${namespace}
+  labels:
+    app: n8n
+    component: webhook
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      app: n8n
+      component: webhook
+  template:
+    metadata:
+      labels:
+        app: n8n
+        component: webhook
+    spec:
+      containers:
+        - name: n8n
+          image: docker.n8n.io/n8nio/n8n:latest
+          command: ["n8n", "webhook"]
+          ports:
+            - containerPort: 5678
+          env:
+            - name: WEBHOOK_URL
+              value: "https://${n8n_hostname}/n8n/"
+            - name: GENERIC_TIMEZONE
+              value: "${timezone}"
+            - name: EXECUTIONS_MODE
+              value: "queue"
+            - name: QUEUE_BULL_REDIS_HOST
+              value: "redis.kube-system-green.svc.cluster.local"
+            - name: QUEUE_BULL_REDIS_PORT
+              value: "6379"
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "postgres.kube-system-green.svc.cluster.local"
+            - name: DB_POSTGRESDB_PORT
+              value: "5432"
+            - name: DB_POSTGRESDB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_DATABASE
+            - name: DB_POSTGRESDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_USER
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: DB_POSTGRESDB_PASSWORD
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: N8N_ENCRYPTION_KEY
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: n8n-storage
+
+---
+# 7. Main Service (Routing)
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n-service
+  namespace: ${namespace}
+spec:
+  selector:
+    app: n8n
+    component: main
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5678
+  type: ClusterIP
+
+---
+# 8. Webhook Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n-webhook-service
+  namespace: ${namespace}
+spec:
+  selector:
+    app: n8n
+    component: webhook
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5678
+  type: ClusterIP
+
+---
+# 9. Ingress (Traefik with Path Prefix)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: n8n-ingress
+  namespace: ${namespace}
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: ${namespace}-n8n-strip-prefix@kubernetescrd
+    traefik.ingress.kubernetes.io/router.priority: "100"
+spec:
+  rules:
+    - host: ${n8n_hostname}
+      http:
+        paths:
+          - path: /n8n/webhook
+            pathType: Prefix
+            backend:
+              service:
+                name: n8n-webhook-service
+                port:
+                  number: 80
+          - path: /n8n
+            pathType: Prefix
+            backend:
+              service:
+                name: n8n-service
+                port:
+                  number: 80

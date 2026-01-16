@@ -1,22 +1,100 @@
 # Example variable values - rename to terraform.tfvars and update with your values
+# ============================================
+# Server Configuration
+# ============================================
+server_ips           = ["192.168.1.2"]
+ssh_username         = "changeme_username"
+ssh_private_key_path = "~/.ssh/id_rsa"
+kube_config_path     = "kubeconfig"
 
-server_ips            = ["127.0.0.1"] #change it into your ip public node / server
-ssh_username          = "changeme_username" #change it into your real username 
-ssh_private_key_path  = "~/.ssh/id_rsa" 
-k3s_default_namespace = "kube-system" #change it into namespace you want
-argocd_hostname       = "argocd.localhost.local" #change it into valid domain for argocd server
-argocd_admin_password = "strong_password" #change it into your admin argocd admin password
-argocd_tls_secret_name = "simple-tls" #change it later
-postgres_database = "sample_db" #change it later
-postgres_root_password = "strong_db_password" #change it later
-postgres_username = "changeme_username" #change it later
-postgres_password = "strong_pass" #change it later
-mariadb_database = "sample_db" #change it later
-mariadb_username = "changeme_username" #change it later
-mariadb_password = "strong_pass" #change it later
-mariadb_root_password = "strong_db_password" #change it later
-mongo_username = "admin"
-mongo_password = "strong_db_password" #change it later
-redis_password = "cache_pass" #change it later
-kube_config_path = "kube_config_path" #change it later
-namespaces = ["default", "kube-system"] #change it later
+# ============================================
+# K3s Configuration
+# ============================================
+k3s_default_namespace = "kube-system"
+k3s_version           = "v1.31.0+k3s1"
+k3s_node_role         = "server"
+k3s_server_url        = "" # Required for agent nodes: https://server-ip:6443
+k3s_token             = "" # Required for agent nodes
+
+# Uncomment untuk agent nodes:
+# k3s_server_url = "https://192.168.1.2:6443"
+# k3s_token      = "your-k3s-token-here"
+
+# ============================================
+# ArgoCD Configuration
+# ============================================
+argocd_hostname        = "argocd.localhost.local"
+argocd_admin_password  = "strong_password"
+argocd_tls_secret_name = "argocd-tls-secret"
+
+# ============================================
+# PostgreSQL Configuration
+# ============================================
+postgres_database      = "your_db_name"
+postgres_root_password = "strong_db_password"
+postgres_username      = "changeme_username"
+postgres_password      = "strong_db_password"
+
+# ============================================
+# MariaDB Configuration
+# ============================================
+mariadb_database      = "your_db_name"
+mariadb_username      = "changeme_username"
+mariadb_password      = "strong_db_password"
+mariadb_root_password = "strong_db_password"
+
+# ============================================
+# MongoDB Configuration
+# ============================================
+mongo_username = "changeme_username"
+mongo_password = "strong_db_password"
+
+# ============================================
+# Redis Configuration
+# ============================================
+redis_password = "strong_db_password"
+
+# ============================================
+# N8N Configuration
+# ============================================
+n8n_hostname       = "your_n8n_domain.com"
+n8n_encryption_key = "strong_encription_key"
+n8n_db_host        = ""
+n8n_db_user        = "changeme_username"
+n8n_db_password    = "strong_db_password"
+
+# ============================================
+# General Configuration
+# ============================================
+GENERIC_TIMEZONE = "Asia/Jakarta"
+
+# ============================================
+# VM Configuration (KVM/Libvirt)
+# ============================================
+vm_hostname  = "k3s-master-01"
+vm_memory    = 4096
+vm_vcpu      = 2
+vm_disk_size = 21474836480 # 20GB
+
+# ============================================
+# Network Configuration
+# ============================================
+network_name   = "default"
+vm_ip_address  = "192.168.1.2/24"
+vm_mac_address = "" # Leave empty for auto-generation
+vm_gateway     = "192.168.1.1"
+vm_nameservers = ["8.8.8.8", "8.8.4.4"]
+
+# ============================================
+# Ubuntu Image Configuration
+# ============================================
+libvirt_pool_name = "default_pool"
+ubuntu_img_url    = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+enable_uefi       = false # Set to true if OVMF is installed
+cpu_mode          = "host-passthrough"
+enable_qemu_agent = true
+autostart         = false
+video_type        = "virtio"
+
+# SSH Public Key (opsional, jika menggunakan KVM module)
+# ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... your-key-here"

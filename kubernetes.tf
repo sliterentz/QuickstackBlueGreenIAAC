@@ -1,8 +1,13 @@
 # Create namespaces
 resource "kubernetes_namespace" "blue" {
+  count      = var.enable_blue_environment ? 1 : 0
   depends_on = [null_resource.wait_for_cluster]
   metadata {
     name = "${var.k3s_default_namespace}-blue"
+  }
+
+  timeouts {
+    delete = "15m"
   }
 }
 
@@ -10,6 +15,10 @@ resource "kubernetes_namespace" "green" {
   depends_on = [null_resource.wait_for_cluster]
   metadata {
     name = "${var.k3s_default_namespace}-green"
+  }
+
+  timeouts {
+    delete = "15m"
   }
 }
 
@@ -42,7 +51,7 @@ resource "random_password" "redis_password" {
 # Create PostgreSQL init script ConfigMaps for both namespaces
 resource "kubernetes_config_map" "postgres_init_script" {
   for_each = toset(local.namespaces)
-  
+
   metadata {
     name      = "postgres-${each.key}-init-script"
     namespace = each.key
@@ -97,7 +106,7 @@ resource "kubernetes_config_map" "postgres_init_script" {
 # Create secrets for all database types in both namespaces
 resource "kubernetes_secret" "postgres_secrets" {
   for_each = toset(local.namespaces)
-  
+
   metadata {
     name      = "postgres-secrets"
     namespace = each.key
@@ -118,7 +127,7 @@ resource "kubernetes_secret" "postgres_secrets" {
 
 resource "kubernetes_secret" "mariadb_secrets" {
   for_each = toset(local.namespaces)
-  
+
   metadata {
     name      = "mariadb-secrets"
     namespace = each.key
@@ -141,7 +150,7 @@ resource "kubernetes_secret" "mariadb_secrets" {
 # Secrets for MongoDB
 resource "kubernetes_secret" "mongodb_secrets" {
   for_each = toset(local.namespaces)
-  
+
   metadata {
     name      = "mongodb-secrets"
     namespace = each.key
@@ -161,7 +170,7 @@ resource "kubernetes_secret" "mongodb_secrets" {
 # Secrets for Redis
 resource "kubernetes_secret" "redis_secrets" {
   for_each = toset(local.namespaces)
-  
+
   metadata {
     name      = "redis-secrets"
     namespace = each.key

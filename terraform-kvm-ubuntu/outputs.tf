@@ -12,3 +12,28 @@ output "connection_command" {
   description = "Perintah SSH untuk connect ke VM"
   value       = "ssh ubuntu@${length(libvirt_domain.ubuntu_vm.network_interface[0].addresses) > 0 ? libvirt_domain.ubuntu_vm.network_interface[0].addresses[0] : "IP_UNKNOWN"}"
 }
+
+output "vm_ip_configured" {
+  description = "IP address yang dikonfigurasi (static atau akan dapat dari DHCP)"
+  value       = var.vm_ip_address != "" ? local.node_ip : "DHCP - Check with: virsh domifaddr ${var.vm_hostname}"
+}
+
+output "k3s_node_role" {
+  description = "Role K3s node"
+  value       = var.k3s_node_role
+}
+
+output "k3s_version" {
+  description = "Versi K3s yang diinstall"
+  value       = var.k3s_version
+}
+
+output "ssh_command" {
+  description = "Command untuk SSH ke VM"
+  value       = var.vm_ip_address != "" ? "ssh ubuntu@${local.node_ip}" : "ssh ubuntu@<check-ip-with-virsh>"
+}
+
+output "kubeconfig_location" {
+  description = "Lokasi kubeconfig di server node"
+  value       = var.k3s_node_role == "server" ? "/etc/rancher/k3s/k3s.yaml" : "N/A (agent node)"
+}
