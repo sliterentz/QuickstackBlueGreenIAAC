@@ -95,6 +95,8 @@ cpu_mode          = "host-passthrough"
 enable_qemu_agent = true
 autostart         = false
 video_type        = "virtio"
+wait_for_ssh      = true
+ssh_timeout       = 300
 
 # SSH Public Key (opsional, jika menggunakan KVM module)
 # ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... your-key-here"

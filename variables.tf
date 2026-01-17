@@ -6,17 +6,6 @@ variable "server_ips" {
   type        = list(string)
 }
 
-variable "ssh_username" {
-  description = "Username untuk SSH ke server"
-  type        = string
-  default     = "ubuntu"
-}
-
-variable "ssh_private_key_path" {
-  description = "Path ke SSH private key"
-  type        = string
-}
-
 variable "kube_config_path" {
   description = "Path untuk menyimpan kubeconfig file"
   type        = string
@@ -283,6 +272,11 @@ variable "vm_ip_address" {
   description = "Static IP address untuk VM (format: 192.168.122.10/24)"
   type        = string
   default     = ""
+
+  validation {
+    condition = var.vm_ip_address == "" || can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?$", var.vm_ip_address))
+    error_message = "The vm_ip_address must be a valid IP address with optional CIDR notation (e.g., '192.168.122.10' or '192.168.122.10/24'), or empty for DHCP."
+  }
 }
 
 variable "vm_mac_address" {
@@ -299,31 +293,56 @@ variable "vm_mac_address" {
 variable "vm_gateway" {
   description = "Gateway IP address"
   type        = string
-  default     = ""
+  default     = "192.168.122.1"
+
+  validation {
+    condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.vm_gateway))
+    error_message = "The vm_gateway must be a valid IP address."
+  }
 }
 
 variable "vm_nameservers" {
   description = "DNS nameservers"
   type        = list(string)
   default     = ["8.8.8.8", "8.8.4.4"]
+
+  validation {
+    condition = alltrue([
+      for ns in var.vm_nameservers : can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", ns))
+    ])
+    error_message = "All nameservers must be valid IP addresses."
+  }
 }
 
+# ============================================================================
+# LIBVIRT CONFIGURATION VARIABLES
+# ============================================================================
 variable "libvirt_pool_name" {
   description = "Name of the libvirt storage pool"
   type        = string
   default     = "k3s_infra_pool"
 }
 
+variable "libvirt_pool_path" {
+  description = "Path for the libvirt storage pool (only used if pool doesn't exist)"
+  type        = string
+  default     = "/var/lib/libvirt/images"
+}
+
+variable "libvirt_domain_type" {
+  description = "Domain type for libvirt (kvm or qemu). Use 'qemu' if nested virtualization is not available."
+  type        = string
+  default     = "kvm"
+  validation {
+    condition     = contains(["kvm", "qemu"], var.libvirt_domain_type)
+    error_message = "Domain type must be 'kvm' or 'qemu'."
+  }
+}
+
 variable "ubuntu_img_url" {
   description = "URL Ubuntu Cloud Image"
   type        = string
   default     = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
-}
-
-variable "ssh_public_key" {
-  description = "SSH Public Key untuk akses VM"
-  type        = string
-  default     = ""
 }
 
 variable "enable_uefi" {
@@ -366,12 +385,38 @@ variable "video_type" {
   }
 }
 
-variable "libvirt_domain_type" {
-  description = "Domain type for libvirt (kvm or qemu). Use 'qemu' if nested virtualization is not available."
+# ============================================================================
+# DEPLOYMENT BEHAVIOR VARIABLES
+# ============================================================================
+variable "wait_for_ssh" {
+  description = "Wait for SSH to be ready before completing deployment"
+  type        = bool
+  default     = true
+}
+
+variable "ssh_timeout" {
+  description = "Maximum time to wait for SSH in seconds"
+  type        = number
+  default     = 600
+}
+
+variable "ssh_public_key" {
+  description = "SSH Public Key untuk akses VM"
   type        = string
-  default     = "kvm"
+
   validation {
-    condition     = contains(["kvm", "qemu"], var.libvirt_domain_type)
-    error_message = "Domain type must be 'kvm' or 'qemu'."
+    condition     = can(regex("^ssh-(rsa|ed25519|ecdsa)", var.ssh_public_key))
+    error_message = "The ssh_public_key must be a valid SSH public key."
   }
+}
+
+variable "ssh_username" {
+  description = "Username untuk SSH ke server"
+  type        = string
+  default     = "ubuntu"
+}
+
+variable "ssh_private_key_path" {
+  description = "Path ke SSH private key"
+  type        = string
 }

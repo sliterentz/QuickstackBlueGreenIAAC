@@ -1,6 +1,25 @@
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+output "vm_id" {
+  description = "ID of the created VM"
+  value       = libvirt_domain.ubuntu_vm.id
+}
+
 output "vm_name" {
   description = "Nama VM yang dibuat"
   value       = libvirt_domain.ubuntu_vm.name
+}
+
+output "vm_hostname" {
+  description = "Hostname of the VM"
+  value       = var.vm_hostname
+}
+
+output "domain_type" {
+  description = "Virtualization type used (kvm or qemu)"
+  value       = local.domain_type
 }
 
 output "vm_ip_address" {
@@ -36,4 +55,9 @@ output "ssh_command" {
 output "kubeconfig_location" {
   description = "Lokasi kubeconfig di server node"
   value       = var.k3s_node_role == "server" ? "/etc/rancher/k3s/k3s.yaml" : "N/A (agent node)"
+}
+
+output "deployment_timestamp" {
+  description = "Timestamp of deployment"
+  value       = local.deployment_timestamp
 }

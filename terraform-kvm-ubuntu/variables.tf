@@ -1,3 +1,7 @@
+# ============================================================================
+# LIBVIRT CONFIGURATION
+# ============================================================================
+
 variable "libvirt_pool_name" {
   description = "Nama storage pool untuk VM (Default: k3s_infra_pool)"
   type        = string
@@ -161,4 +165,19 @@ variable "libvirt_domain_type" {
     condition     = contains(["kvm", "qemu"], var.libvirt_domain_type)
     error_message = "Domain type must be 'kvm' or 'qemu'."
   }
+}
+
+# ============================================================================
+# DEPLOYMENT BEHAVIOR VARIABLES
+# ============================================================================
+variable "wait_for_ssh" {
+  description = "Wait for SSH to be ready before completing deployment"
+  type        = bool
+  default     = true
+}
+
+variable "ssh_timeout" {
+  description = "Maximum time to wait for SSH in seconds"
+  type        = number
+  default     = 600
 }

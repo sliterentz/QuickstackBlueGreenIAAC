@@ -14,15 +14,71 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Logging
+LOG_DIR="$PROJECT_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/deploy-$(date +%Y%m%d-%H%M%S).log"
+
+# Function to print status
+print_status() {
+    local status=$1
+    local message=$2
+    
+    if [ "$status" = "ok" ]; then
+        echo -e "${GREEN}✓${NC} $message"
+    elif [ "$status" = "warn" ]; then
+        echo -e "${YELLOW}⚠${NC} $message"
+    else
+        echo -e "${RED}✗${NC} $message"
+    fi
+}
+
+# Function to log messages
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+# Add cleanup function
+cleanup_volumes() {
+    local hostname="$1"
+    local pool_name="${2:-k3s_infra_pool}"
+    
+    echo "=== Cleaning up existing volumes for $hostname ==="
+    
+    # Sanitize hostname
+    local sanitized=$(echo "$hostname" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+    
+    # List of volumes to check
+    local volumes=(
+        "cloudinit-${sanitized}.iso"
+        "ubuntu-disk-${sanitized}.qcow2"
+        "ubuntu-base-img-${sanitized}.qcow2"
+    )
+    
+    for vol in "${volumes[@]}"; do
+        if virsh vol-info "$vol" --pool "$pool_name" >/dev/null 2>&1; then
+            echo "  Removing: $vol"
+            virsh vol-delete "$vol" --pool "$pool_name" 2>/dev/null || true
+        fi
+    done
+    
+    echo "✓ Cleanup complete"
+}
+
 # Default values
 ACTION="apply"
 AUTO_APPROVE=false
 SKIP_PREFLIGHT=false
 SKIP_PLAN=false
+FORCE_CLEANUP=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --cleanup)
+            FORCE_CLEANUP=true
+            shift
+            ;;
         plan)
             ACTION="plan"
             shift
@@ -115,6 +171,20 @@ echo -e "${CYAN}Auto-approve: ${YELLOW}$AUTO_APPROVE${NC}"
 echo -e "${CYAN}Working directory: ${YELLOW}$PROJECT_ROOT${NC}"
 echo ""
 sleep 2
+
+# Add before terraform init
+echo "=== Cleaning Old Detection Files ==="
+rm -f terraform-kvm-ubuntu/.virt_type
+rm -f terraform-kvm-ubuntu/.emulator_path
+rm -f terraform-kvm-ubuntu/.kvm_type
+echo "✓ Detection files cleaned"
+echo ""
+
+# Add cleanup before terraform if requested
+if [ "$FORCE_CLEANUP" = true ]; then
+    echo "Force cleanup requested..."
+    cleanup_volumes "ubuntu-lts-vm" "k3s_infra_pool"
+fi
 
 # Step 1: Pre-flight checks
 if [ "$SKIP_PREFLIGHT" = false ]; then

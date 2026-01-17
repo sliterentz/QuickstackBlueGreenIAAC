@@ -3,8 +3,11 @@
 .terraform.lock.hcl
 .terraform.tfstate.lock.*
 terraform.tfstate.backup
+terraform.tfstate.backup-*
 terraform.tfstate.*.backup
 terraform.tfstate
+terraform.tfstate.d
+tfplan-apply-*
 *.tfvars
 !example.tfvars
 override.tf
@@ -33,6 +36,22 @@ kubeconfig
 .DS_Store
 Thumbs.db
 
-logs/*
+# Virtualization detection files
+.virt_type
+.emulator_path
+.kvm_type
 
-.trae/*
+# Cloud-init generated files
+*.iso
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+*~

@@ -30,6 +30,10 @@ terraform {
       source  = "dmacvicar/libvirt"
       version = "~> 0.7.6"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
   required_version = ">= 1.0.0"
 }
@@ -67,11 +71,16 @@ module "kvm_ubuntu" {
   vm_ip_address  = var.vm_ip_address
   vm_gateway     = var.vm_gateway
   vm_nameservers = var.vm_nameservers
+  libvirt_pool_name = var.libvirt_pool_name
+  libvirt_domain_type = var.libvirt_domain_type
   ubuntu_img_url = var.ubuntu_img_url
   network_name   = var.network_name
   ssh_public_key = file("${var.ssh_private_key_path}.pub")
   ssh_username   = var.ssh_username
-  libvirt_domain_type = var.libvirt_domain_type
+  k3s_version      = var.k3s_version
+  k3s_node_role    = var.k3s_node_role
+  k3s_server_url   = var.k3s_server_url
+  k3s_token        = var.k3s_token
   cpu_mode       = var.cpu_mode
 }
 

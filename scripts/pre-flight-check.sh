@@ -98,6 +98,47 @@ else
     exit 1
 fi
 
+echo "=== Installing QEMU Dependencies ==="
+echo ""
+
+# Detect OS
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS=$ID
+else
+  echo "Cannot detect OS"
+  exit 1
+fi
+
+echo "Detected OS: $OS"
+echo ""
+
+case $OS in
+  ubuntu|debian)
+    echo "Installing QEMU for Ubuntu/Debian..."
+    sudo apt-get update
+    sudo apt-get install -y qemu-system-x86 qemu-utils
+    ;;
+    
+  rhel|centos|fedora|almalinux)
+    echo "Installing QEMU for RHEL/CentOS/Fedora..."
+    if command -v dnf &>/dev/null; then
+      sudo dnf install -y qemu-kvm qemu-img
+    else
+      sudo yum install -y qemu-kvm qemu-img
+    fi
+    ;;
+    
+  *)
+    echo "Unsupported OS: $OS"
+    exit 1
+    ;;
+esac
+
+echo ""
+echo "✓ QEMU installed successfully"
+echo ""
+
 # Check QEMU installation
 if command_exists qemu-system-x86_64; then
     print_status "ok" "QEMU is installed"
