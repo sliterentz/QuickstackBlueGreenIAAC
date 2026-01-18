@@ -51,7 +51,7 @@ variable "video_type" {
 variable "vm_hostname" {
   description = "Hostname untuk virtual machine"
   type        = string
-  default     = "ubuntu-lts-vm"
+  default     = "k3s-master-01"
 }
 
 variable "vm_memory" {

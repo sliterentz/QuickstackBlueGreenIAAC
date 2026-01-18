@@ -183,7 +183,7 @@ echo ""
 # Add cleanup before terraform if requested
 if [ "$FORCE_CLEANUP" = true ]; then
     echo "Force cleanup requested..."
-    cleanup_volumes "ubuntu-lts-vm" "k3s_infra_pool"
+    cleanup_volumes "${var.vm_hostname}" "k3s_infra_pool"
 fi
 
 # Step 1: Pre-flight checks
@@ -234,11 +234,32 @@ case $ACTION in
             APPLY_ARGS="--auto-approve"
         fi
         
-        if bash "$SCRIPT_DIR/terraform_apply.sh" $APPLY_ARGS; then
+        # Retry mechanism
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        SUCCESS=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if [ $RETRY_COUNT -gt 0 ]; then
+                echo -e "${YELLOW}⚠️  Retry attempt $((RETRY_COUNT+1))/${MAX_RETRIES}...${NC}"
+                echo "Waiting 10 seconds before retrying..."
+                sleep 10
+            fi
+            
+            if bash "$SCRIPT_DIR/terraform_apply.sh" $APPLY_ARGS; then
+                SUCCESS=true
+                break
+            else
+                echo -e "${RED}❌ Deployment attempt $((RETRY_COUNT+1)) failed${NC}"
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+            fi
+        done
+        
+        if [ "$SUCCESS" = true ]; then
             echo -e "${GREEN}✅ Deployment completed successfully${NC}"
             exit 0
         else
-            echo -e "${RED}❌ Deployment failed${NC}"
+            echo -e "${RED}❌ Deployment failed after $MAX_RETRIES attempts${NC}"
             exit 1
         fi
         ;;
