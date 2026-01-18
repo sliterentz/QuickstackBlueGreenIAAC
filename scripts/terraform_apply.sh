@@ -19,14 +19,22 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/terraform-apply-$(date +%Y%m%d-%H%M%S).log"
 
+# Source lifecycle management
+source "$SCRIPT_DIR/terraform_lifecycle.sh"
+
 # Parse arguments
 AUTO_APPROVE=false
 PLAN_FILE=""
+PRESERVE_DOMAIN=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --auto-approve)
             AUTO_APPROVE=true
+            shift
+            ;;
+        --preserve-domain)
+            PRESERVE_DOMAIN=true
             shift
             ;;
         --plan-file)
@@ -63,6 +71,20 @@ if [ -f terraform.tfstate ]; then
 fi
 
 cd ..
+
+# Check if domain preservation is enabled
+if [ "$PRESERVE_DOMAIN" = true ] && [ "$AUTO_APPROVE" = true ]; then
+    echo -e "${CYAN}Domain preservation mode enabled${NC}"
+    
+    # Use lifecycle management with preservation
+    if terraform_lifecycle_preserve "apply" "$AUTO_APPROVE"; then
+        echo -e "${GREEN}✓ Terraform apply completed (preserve mode)${NC}"
+        exit 0
+    else
+        echo -e "${RED}✗ Terraform apply failed${NC}"
+        exit 1
+    fi
+fi
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║          Terraform Apply - Safe Deployment             ║${NC}"
@@ -205,24 +227,16 @@ fi
 echo ""
 
 # Step 2: Check Terraform initialization
-echo -e "${BLUE}[2/7]${NC} Checking Terraform initialization..."
-log_message "Checking Terraform initialization"
+echo -e "${BLUE}[2/7]${NC} Checking Terraform initialization and upgrade..."
+log_message "Checking Terraform initialization and upgrade"
 
-if [ ! -d ".terraform" ]; then
-    print_status "warn" "Terraform not initialized. Running terraform init..."
-    log_message "Running terraform init"
-    
-    if terraform init -upgrade 2>&1 | tee -a "$LOG_FILE"; then
-        print_status "ok" "Terraform initialized successfully"
-        log_message "Terraform initialized successfully"
-    else
-        print_status "error" "Terraform initialization failed"
-        log_message "ERROR: Terraform initialization failed"
-        exit 1
-    fi
+if bash "$SCRIPT_DIR/terraform_init_upgrade.sh"; then
+    print_status "ok" "Terraform initialization and upgrade completed successfully"
+    log_message "Terraform initialization and upgrade completed successfully"
 else
-    print_status "ok" "Terraform is initialized"
-    log_message "Terraform is initialized"
+    print_status "error" "Terraform initialization and upgrade failed"
+    log_message "ERROR: Terraform initialization and upgrade failed"
+    exit 1
 fi
 echo ""
 
@@ -341,7 +355,7 @@ if terraform apply \
     
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║           Deployment Completed Successfully ✅          ║${NC}"
+    echo -e "${GREEN}║           Deployment Completed Successfully ✅         ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${CYAN}Deployment Statistics:${NC}"
@@ -422,7 +436,7 @@ else
     
     echo ""
     echo -e "${RED}╔════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║              Deployment Failed ❌                       ║${NC}"
+    echo -e "${RED}║              Deployment Failed ❌                      ║${NC}"
     echo -e "${RED}╚════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${YELLOW}Deployment failed after ${DURATION}s${NC}"

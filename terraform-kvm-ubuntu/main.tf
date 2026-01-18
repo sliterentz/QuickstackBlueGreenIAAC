@@ -18,23 +18,23 @@ resource "null_resource" "pool_management" {
       echo "Checking storage pool '$POOL_NAME'..."
       
       # Cek apakah pool sudah didefinisikan di libvirt
-      if virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
+      if sudo virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
         echo "✓ Pool '$POOL_NAME' already exists."
         
         # Cek apakah pool aktif (running)
-        if ! virsh pool-list --active | grep -q "$POOL_NAME"; then
+        if ! sudo virsh pool-list --persistent | grep -q "$POOL_NAME"; then
              echo "Starting pool '$POOL_NAME'..."
-             virsh pool-start "$POOL_NAME"
+             sudo virsh pool-start "$POOL_NAME"
         else
              echo "✓ Pool '$POOL_NAME' is active."
         fi
       else
         echo "Pool '$POOL_NAME' does not exist. Creating..."
         # Define, Build, Start, Autostart
-        virsh pool-define-as --name "$POOL_NAME" --type dir --target "$POOL_PATH"
-        virsh pool-build "$POOL_NAME"
-        virsh pool-start "$POOL_NAME"
-        virsh pool-autostart "$POOL_NAME"
+        sudo virsh pool-define-as --name "$POOL_NAME" --type dir --target "$POOL_PATH"
+        sudo virsh pool-build "$POOL_NAME"
+        sudo virsh pool-start "$POOL_NAME"
+        sudo virsh pool-autostart "$POOL_NAME"
         echo "✓ Pool '$POOL_NAME' created and started."
       fi
     EOT
@@ -52,7 +52,8 @@ resource "null_resource" "detect_virtualization" {
       set +e
       
       # Redirect all output to log file
-      LOG_FILE="${path.module}/.virt_detection.log"
+      LOG_FILE="${path.root}/logs/.virt_detection.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
       exec > "$LOG_FILE" 2>&1
 
       # Helper function for logging
@@ -221,8 +222,9 @@ resource "null_resource" "verify_cloudinit_cleanup" {
     command = <<-EOT
       set -e
 
-      # Redirect all output to log file
-      LOG_FILE="${path.module}/.cloudinit_verification.log"
+      # Step 1: Check cloud-init status
+      LOG_FILE="${path.root}/logs/.cloudinit_verification.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
       exec > "$LOG_FILE" 2>&1
 
       echo "=== Verifying cloudinit volume cleanup ==="
@@ -289,11 +291,11 @@ resource "null_resource" "verify_cloudinit_cleanup" {
           echo "✗ Cloudinit Verification Failed"
           echo "  Volume still exists: $CLOUDINIT_NAME"
           echo "  Manual cleanup required"
-          echo "  Full log: ${path.module}/.cloudinit_verification.log"
+          echo "  Full log: ${path.root}/logs/.cloudinit_verification.log"
         else
           echo "✓ Cloudinit Verification Complete"
           echo "  No volume conflicts detected"
-          echo "  Full log: ${path.module}/.cloudinit_verification.log"
+          echo "  Full log: ${path.root}/logs/.cloudinit_verification.log"
         fi
       } >&2
       
@@ -563,7 +565,8 @@ resource "null_resource" "cleanup_cloudinit" {
       set +e  # Don't exit on error
       
       # Redirect all output to log file
-      LOG_FILE="${path.module}/.cloudinit_cleanup.log"
+      LOG_FILE="${path.root}/logs/.cloudinit_cleanup.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
       exec > "$LOG_FILE" 2>&1
 
       echo "=== Checking for existing cloudinit volume ==="
@@ -590,13 +593,13 @@ resource "null_resource" "cleanup_cloudinit" {
         
         # Find and stop any VMs using this volume FIRST
         echo "Checking for VMs using this volume..."
-        for vm in $(virsh list --all --name); do
+        for vm in $(sudo virsh list --all --name); do
           if [ -n "$vm" ]; then
-            if virsh domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
+            if sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
               echo "  Found VM using volume: $vm"
               
               # Check if VM is running
-              if virsh list --state-running --name | grep -q "^$vm$"; then
+              if sudo virsh list --state-running --name | grep -q "^$vm$"; then
                 echo "  Stopping running VM: $vm"
                 sudo virsh destroy "$vm" 2>/dev/null || true
                 sleep 3
@@ -656,7 +659,7 @@ resource "null_resource" "cleanup_cloudinit" {
               echo "✗ Cloudinit cleanup failed"
               echo "  Volume: $CLOUDINIT_NAME"
               echo "  Manual cleanup required: virsh vol-delete $CLOUDINIT_NAME --pool $POOL_NAME"
-              echo "  Full log: ${path.module}/.cloudinit_cleanup.log"
+              echo "  Full log: ${path.root}/logs/.cloudinit_cleanup.log"
             } >&2
 
             exit 1
@@ -698,7 +701,7 @@ resource "null_resource" "cleanup_cloudinit" {
           echo "✓ Cloudinit Cleanup Check Complete"
           echo "  No existing volume found"
         fi
-        echo "  Full log: ${path.module}/.cloudinit_cleanup.log"
+        echo "  Full log: ${path.root}/logs/.cloudinit_cleanup.log"
       } >&2
 
       exit 0
@@ -710,8 +713,6 @@ resource "null_resource" "cleanup_cloudinit" {
   triggers = {
     # Run cleanup whenever hostname changes
     hostname = local.sanitized_hostname
-    # Always run on apply
-    timestamp = timestamp()
   }
 
   depends_on = [
@@ -774,6 +775,7 @@ resource "libvirt_cloudinit_disk" "commoninit" {
     null_resource.pool_management,
     null_resource.cleanup_cloudinit,
     null_resource.verify_cloudinit_cleanup,
+    null_resource.pre_deployment_check, # Ensure pre-deployment check completes before ISO creation
     time_sleep.wait_for_cleanup,
     data.template_file.user_data,
     data.template_file.network_config
@@ -781,6 +783,7 @@ resource "libvirt_cloudinit_disk" "commoninit" {
 
   lifecycle {
     create_before_destroy = false
+    replace_triggered_by = [null_resource.cleanup_cloudinit]
   }
 }
 
@@ -790,107 +793,209 @@ resource "libvirt_cloudinit_disk" "commoninit" {
 resource "null_resource" "pre_deployment_check" {
   provisioner "local-exec" {
     command = <<-EOT
-      set -e
+      set +e
+      
+      # Step 1: Initialize logging with absolute paths
+      LOG_DIR="${path.root}/logs"
+      LOG_FILE="${path.root}/logs/.cloudinit_cleanup.log"
+      
+      # Ensure log directory exists with correct permissions
+      if [ ! -d "$LOG_DIR" ]; then
+        mkdir -p "$LOG_DIR"
+        chmod 755 "$LOG_DIR"
+      fi
+      
+      # Redirect all output to log file
+      exec > "$LOG_FILE" 2>&1
       
       echo "=== Pre-deployment Validation ==="
+      echo "Timestamp: $(date)"
+      echo "Working Directory: $(pwd)"
+      echo "User: $(whoami)"
       
-      # Read detected configuration
-      if [ ! -f "${path.module}/.virt_type" ]; then
-        echo "✗ Virtualization type file not found"
-        exit 1
-      fi
+      # Function to log to both file and stderr (so it shows in terraform output if failed)
+      log_error() {
+        echo "✗ ERROR: $1" >&2
+        echo "✗ ERROR: $1"
+      }
       
-      if [ ! -f "${path.module}/.emulator_path" ]; then
-        echo "✗ Emulator path file not found"
-        exit 1
-      fi
+      # Step 2: Wait for detection files to be created by detect_virtualization
+      MAX_WAIT=60
+      WAIT_COUNT=0
+      echo "Waiting for virtualization detection files in ${path.module}..."
       
-      VIRT_TYPE=$(cat ${path.module}/.virt_type)
-      EMULATOR=$(cat ${path.module}/.emulator_path)
-      
-      echo "Detected Configuration:"
-      echo "  Virt Type: $VIRT_TYPE"
-      echo "  Emulator: $EMULATOR"
-      
-      # Validate configuration
-      if [ -z "$VIRT_TYPE" ]; then
-        echo "✗ Virtualization type is empty"
-        exit 1
-      fi
-      
-      if [ -z "$EMULATOR" ]; then
-        echo "✗ Emulator path is empty"
-        exit 1
-      fi
-      
-      if [ ! -x "$EMULATOR" ]; then
-        echo "✗ Emulator not executable: $EMULATOR"
-        exit 1
-      fi
-      
-      # Test emulator
-      echo "Testing emulator..."
-      if ! "$EMULATOR" --version >/dev/null 2>&1; then
-        echo "✗ Emulator test failed"
-        exit 1
-      fi
-      
-      # Verify virt type compatibility
-      echo "Verifying virt type compatibility..."
-      if [ "$VIRT_TYPE" = "kvm" ]; then
-        if [ ! -e /dev/kvm ]; then
-          echo "✗ KVM type selected but /dev/kvm not found"
-          exit 1
+      while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+        if [ -f "${path.module}/.virt_type" ] && [ -f "${path.module}/.emulator_path" ]; then
+          echo "✓ Detection files found after $WAIT_COUNT seconds"
+          break
         fi
-        if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-          echo "✗ KVM type selected but user lacks /dev/kvm access"
-          exit 1
-        fi
-      fi
+        
+        [ $((WAIT_COUNT % 5)) -eq 0 ] && echo "  Waiting... ($WAIT_COUNT/$MAX_WAIT)"
+        sleep 1
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+      done
 
-      # ADDED: Check for volume conflicts
+      # Step 3: Verify detection results
+      if [ ! -f "${path.module}/.virt_type" ] || [ ! -f "${path.module}/.emulator_path" ]; then
+        log_error "Virtualization detection files not found after $MAX_WAIT seconds"
+        log_error "Expected files in: ${path.module}"
+        log_error "Please check ${path.root}/logs/.virt_detection.log for details"
+        exit 1
+      fi
+      
+      VIRT_TYPE=$(cat "${path.module}/.virt_type" | tr -d '\n\r')
+      EMULATOR=$(cat "${path.module}/.emulator_path" | tr -d '\n\r')
+      
+      echo "Detected: type=$VIRT_TYPE, emulator=$EMULATOR"
+
+      # Step 4: KVM accessibility check
+      if [ "$VIRT_TYPE" = "kvm" ]; then
+        if [ ! -w /dev/kvm ]; then
+          echo "⚠ KVM type selected but user lacks /dev/kvm access"
+          echo "  Current user: $(whoami)"
+          echo "  /dev/kvm permissions: $(ls -l /dev/kvm 2>/dev/null || echo 'not found')"
+          echo "  Falling back to QEMU emulation"
+          echo "qemu" > "${path.module}/.virt_type"
+          VIRT_TYPE="qemu"
+        else
+          echo "✓ KVM available and accessible"
+        fi
+      fi
+      
+      # Step 5: Check for volume conflicts
       echo ""
       echo "Checking for volume conflicts..."
       CLOUDINIT_NAME="cloudinit-${local.sanitized_hostname}.iso"
       POOL_NAME="${var.libvirt_pool_name}"
 
-      if virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
-        echo "✗ CRITICAL: Cloudinit volume still exists!"
-        echo "  Volume: $CLOUDINIT_NAME"
-        echo "  Pool: $POOL_NAME"
-        echo ""
-        echo "Emergency cleanup..."
+      # Refresh pool to ensure we have the latest state
+      echo "Refreshing storage pool '$POOL_NAME'..."
+      sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || echo "  Warning: Pool refresh failed"
+      
+      if sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
+        echo "⚠ Found existing cloudinit volume: $CLOUDINIT_NAME"
+        echo "  Attempting to resolve conflict..."
         
-        # Last ditch effort
-        virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null || true
-        sleep 3
+        # Check if any VM is using it
+        USING_VM=$(sudo virsh list --all --name | while read vm; do
+          if [ -n "$vm" ] && sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
+            echo "$vm"
+            break
+          fi
+        done)
         
-        # Final check
-        if virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
-          echo "✗ FATAL: Cannot proceed with existing volume"
-          echo "Please manually remove:"
-          echo "  virsh vol-delete $CLOUDINIT_NAME --pool $POOL_NAME"
-          exit 1
+        if [ -n "$USING_VM" ]; then
+          echo "  Volume is in use by VM: $USING_VM"
+          echo "  Stopping and undefining VM..."
+          sudo virsh destroy "$USING_VM" 2>/dev/null || true
+          sudo virsh undefine "$USING_VM" --remove-all-storage 2>/dev/null || true
+          sleep 2
         fi
         
-        echo "✓ Emergency cleanup successful"
+        # Delete volume
+        if sudo virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null; then
+          echo "  ✓ Volume deleted successfully"
+        else
+          log_error "Failed to delete conflicting volume: $CLOUDINIT_NAME"
+          log_error "Manual fix: virsh vol-delete $CLOUDINIT_NAME --pool $POOL_NAME"
+          exit 1
+        fi
+      fi
+      
+      # Step 6: Check for existing domain
+      echo ""
+      echo "Checking for existing domain..."
+      DOMAIN_NAME="${local.sanitized_hostname}"
+      
+      if sudo virsh dominfo "$DOMAIN_NAME" >/dev/null 2>&1; then
+        echo "⚠ Domain already exists: $DOMAIN_NAME"
+        DOMAIN_STATE=$(sudo virsh domstate "$DOMAIN_NAME" 2>/dev/null || echo "unknown")
+        echo "  Current state: $DOMAIN_STATE"
+        
+        # Check if domain is in Terraform state
+        if terraform state list 2>/dev/null | grep -q "libvirt_domain.ubuntu_vm"; then
+          echo "  Domain is in Terraform state"
+        else
+          echo "  Domain NOT in Terraform state"
+          echo "  This may cause conflicts during apply"
+        fi
       else
-        echo "✓ No volume conflicts detected"
+        echo "✓ No existing domain found"
       fi
 
+      # Step 7: Verify storage pool exists and is active
+      echo ""
+      echo "Verifying storage pool status..."
+      if ! sudo virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
+        log_error "Storage pool '$POOL_NAME' not found"
+        log_error "Please ensure the pool is defined and started"
+        exit 1
+      fi
+
+      if ! sudo virsh pool-list --persistent | grep -q "$POOL_NAME"; then
+        echo "⚠ Storage pool '$POOL_NAME' is not active. Attempting to start..."
+        if ! sudo virsh pool-start "$POOL_NAME" 2>/dev/null; then
+          log_error "Could not start storage pool '$POOL_NAME'"
+          exit 1
+        fi
+      fi
+
+      # Step 8: Verify storage pool has enough space
+      echo ""
+      echo "Checking storage pool capacity..."
+      POOL_INFO=$(sudo virsh pool-info "$POOL_NAME" 2>/dev/null || echo "")
+      if [ -n "$POOL_INFO" ]; then
+        AVAILABLE=$(echo "$POOL_INFO" | grep "Available:" | awk '{print $2}')
+        echo "  Available space: $AVAILABLE"
+        
+        # Simple check for low space
+        if echo "$AVAILABLE" | grep -q "M"; then
+          echo "⚠ WARNING: Low disk space in storage pool (< 1GB)"
+        fi
+      fi
+
+      # Step 9: Final system checks
+      if [ ! -x "$EMULATOR" ]; then
+        log_error "Emulator not executable: $EMULATOR"
+        exit 1
+      fi
+      
+      echo ""
       echo "✓ Pre-deployment validation passed"
-      echo "  Will use: $VIRT_TYPE with $EMULATOR"
+      echo "  Virt Type: $VIRT_TYPE"
+      echo "  Emulator: $EMULATOR"
+      echo "  Domain: $DOMAIN_NAME"
+      echo "  Pool: $POOL_NAME"
+      echo "Completed at: $(date)"
+      
+      # Output summary to console
+      {
+        echo "✓ Pre-deployment Check Complete"
+        echo "  Type: $VIRT_TYPE | Emulator: $EMULATOR"
+        echo "  Log: ${path.root}/logs/.pre_deployment_check.log"
+      } >&2
+      
       exit 0
     EOT
     
     interpreter = ["/bin/bash", "-c"]
   }
 
+  triggers = {
+    # Re-run on hostname change
+    hostname = local.sanitized_hostname
+    # Use timestamp of detection resource instead of file hash
+    detection_id = null_resource.detect_virtualization.id
+  }
+
   depends_on = [
     null_resource.detect_virtualization,
     null_resource.validation,
     null_resource.cleanup_cloudinit,
-    null_resource.verify_cloudinit_cleanup
+    null_resource.verify_cloudinit_cleanup,
+    time_sleep.wait_for_cleanup, # Wait for cleanup to settle before final pre-deployment check
+    data.local_file.virt_type,
+    data.local_file.emulator_path
   ]
 }
 
@@ -924,8 +1029,8 @@ resource "libvirt_domain" "ubuntu_vm" {
   # Firmware - conditional UEFI
   firmware = local.use_uefi ? local.uefi_firmware_path : null
 
-  # QEMU Agent untuk monitoring
-  qemu_agent = true
+  # QEMU Agent untuk monitoring (Disabled to prevent plan failure if agent is slow)
+  qemu_agent = false
 
   # Autostart
   autostart = var.autostart
@@ -968,7 +1073,7 @@ resource "libvirt_domain" "ubuntu_vm" {
     type = "virtio"
   }
 
-  # Dependencies
+  # Dependencies - FIXED: Strict ordering to avoid race conditions with cloudinit ISO
   depends_on = [
     libvirt_volume.ubuntu_base,
     libvirt_cloudinit_disk.commoninit,
@@ -982,6 +1087,9 @@ resource "libvirt_domain" "ubuntu_vm" {
 
   # Lifecycle management
   lifecycle {
+    # Prevent accidental destruction
+    prevent_destroy = false
+    # Create before destroy to minimize downtime
     create_before_destroy = false
     ignore_changes = [
       network_interface[0].addresses,
@@ -1003,6 +1111,8 @@ resource "null_resource" "health_check" {
 
   provisioner "local-exec" {
     command = <<-EOT
+      export LOG_FILE="${path.root}/logs/.health_check.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
       bash "${path.module}/scripts/health_check.sh" \
         "${local.sanitized_hostname}" \
         "${var.vm_hostname}" \

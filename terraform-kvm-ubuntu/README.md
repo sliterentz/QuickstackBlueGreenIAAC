@@ -27,7 +27,8 @@ Sebelum memulai, pastikan sistem host Anda memenuhi kriteria berikut:
 - **OS**: Ubuntu 20.04/22.04/24.04 atau Debian 11/12 (Bare Metal atau VM dengan Nested Virtualization enabled).
 - **CPU**: Support Virtualization (Intel VT-x atau AMD-V).
 - **RAM**: Minimal 4GB free.
-- **User**: Akses sudo.
+- **Storage Pool**: Storage pool libvirt harus terdefinisi dan aktif (default: `k3s_infra_pool` di `/var/lib/libvirt/images/k3s_infra_pool`).
+- **User**: Akses sudo dan masuk ke grup `libvirt` serta `kvm`.
 
 ## 🚀 Panduan Instalasi Cepat
 

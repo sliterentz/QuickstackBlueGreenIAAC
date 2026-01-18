@@ -75,7 +75,7 @@ module "kvm_ubuntu" {
   libvirt_domain_type = var.libvirt_domain_type
   ubuntu_img_url = var.ubuntu_img_url
   network_name   = var.network_name
-  ssh_public_key = file("${var.ssh_private_key_path}.pub")
+  ssh_public_key = "${var.ssh_private_key_path}.pub"
   ssh_username   = var.ssh_username
   k3s_version      = var.k3s_version
   k3s_node_role    = var.k3s_node_role
@@ -118,7 +118,6 @@ locals {
 
   # Cluster dianggap siap jika file ada, berisi konfigurasi cluster (server URL), bukan IP local, dan bukan file kosong/dummy
   kubeconfig_ready = local.detected_kube_path != "NOT_FOUND" && length(regexall("server: https://", local.kubeconfig_content)) > 0 && length(regexall("127.0.0.1", local.kubeconfig_content)) == 0
-
 
   # Pastikan file kubeconfig ada (meskipun kosong) agar provider tidak error saat init
   # Kita buat file dummy jika tidak ada sama sekali

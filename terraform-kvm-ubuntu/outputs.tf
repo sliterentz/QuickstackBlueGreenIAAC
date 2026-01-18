@@ -61,3 +61,18 @@ output "deployment_timestamp" {
   description = "Timestamp of deployment"
   value       = local.deployment_timestamp
 }
+
+# ============================================================================
+# TROUBLESHOOTING & LOGS
+# ============================================================================
+output "troubleshooting_info" {
+  description = "Troubleshooting information and log locations"
+  value = {
+    health_check_log           = "${path.module}/logs/.health_check.log"
+    virt_detection_log         = "${path.module}/logs/.virt_detection.log"
+    cloudinit_cleanup_log      = "${path.module}/logs/.cloudinit_cleanup.log"
+    cloudinit_verification_log = "${path.module}/logs/.cloudinit_verification.log"
+    pre_deployment_check_log   = "${path.module}/logs/.pre_deployment_check.log"
+    view_logs_command          = "tail -f ${path.module}/logs/.health_check.log"
+  }
+}

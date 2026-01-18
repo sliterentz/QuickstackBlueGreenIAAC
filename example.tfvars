@@ -23,6 +23,8 @@ k3s_token             = "" # Required for agent nodes
 # ============================================
 # ArgoCD Configuration
 # ============================================
+deploy_argocd          = false
+argocd_namespace       = "argocd"
 argocd_hostname        = "argocd.localhost.local"
 argocd_admin_password  = "strong_password"
 argocd_tls_secret_name = "argocd-tls-secret"
@@ -100,3 +102,9 @@ ssh_timeout       = 300
 
 # SSH Public Key (opsional, jika menggunakan KVM module)
 # ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... your-key-here"
+
+# Integration Credentials (will be used inside n8n UI, but good to have ready)
+open_api_key                    = "changeme_key"
+whatsapp_access_token           = "access_token"
+whatsapp_phone_number_id        = "phone_number"
+whatsapp_bussiness_account_id   = "bussiness_id"

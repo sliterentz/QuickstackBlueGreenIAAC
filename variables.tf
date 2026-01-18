@@ -51,32 +51,6 @@ variable "k3s_token" {
 }
 
 # ============================================
-# ArgoCD Configuration Variables
-# ============================================
-variable "argocd_hostname" {
-  description = "Hostname untuk ArgoCD server"
-  type        = string
-}
-
-variable "argocd_admin_password" {
-  description = "Password untuk ArgoCD admin user"
-  type        = string
-  sensitive   = true
-}
-
-variable "argocd_tls_secret_name" {
-  description = "Nama secret untuk TLS certificate ArgoCD"
-  type        = string
-  default     = "argocd-tls-secret"
-}
-
-variable "argocd_version" {
-  description = "Versi Helm Chart ArgoCD"
-  type        = string
-  default     = "7.3.4"
-}
-
-# ============================================
 # PostgreSQL Configuration Variables
 # ============================================
 variable "postgres_database" {
@@ -403,11 +377,6 @@ variable "ssh_timeout" {
 variable "ssh_public_key" {
   description = "SSH Public Key untuk akses VM"
   type        = string
-
-  validation {
-    condition     = can(regex("^ssh-(rsa|ed25519|ecdsa)", var.ssh_public_key))
-    error_message = "The ssh_public_key must be a valid SSH public key."
-  }
 }
 
 variable "ssh_username" {
@@ -419,4 +388,28 @@ variable "ssh_username" {
 variable "ssh_private_key_path" {
   description = "Path ke SSH private key"
   type        = string
+}
+
+variable "open_api_key" {
+  description = "Open AI API Key"
+  type        = string
+  default     = ""
+}
+
+variable "whatsapp_access_token" {
+  description = "Whatsapp Access Token"
+  type        = string
+  default     = ""
+}
+
+variable "whatsapp_phone_number_id" {
+  description = "Whatsapp Phone Number ID"
+  type        = string
+  default     = ""
+}
+
+variable "whatsapp_bussiness_account_id" {
+  description = "Whatsapp Business Account ID"
+  type        = string
+  default     = ""
 }

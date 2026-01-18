@@ -48,11 +48,12 @@ output "vm_management_commands" {
 output "troubleshooting_info" {
   description = "Troubleshooting information and log locations"
   value = {
-    health_check_log       = "${path.module}/.health_check.log"
-    virt_detection_log     = "${path.module}/.virt_detection.log"
-    cloudinit_cleanup_log  = "${path.module}/.cloudinit_cleanup.log"
-    cloudinit_verification_log = "${path.module}/.cloudinit_verification.log"
-    view_logs_command      = "tail -f ${path.module}/.health_check.log"
+    health_check_log       = "${path.module}/logs/.health_check.log"
+    virt_detection_log     = "${path.module}/logs/.virt_detection.log"
+    cloudinit_cleanup_log  = "${path.module}/logs/.cloudinit_cleanup.log"
+    cloudinit_verification_log = "${path.module}/logs/.cloudinit_verification.log"
+    pre_deployment_check_log   = "${path.module}/logs/.pre_deployment_check.log"
+    view_logs_command      = "tail -f ${path.module}/logs/.health_check.log"
   }
 }
 
@@ -103,15 +104,7 @@ output "storage_pool" {
   }
 }
 
-output "volume_id" {
-  description = "The ID of the VM's root volume"
-  value       = libvirt_volume.ubuntu_base.id
-}
 
-output "cloudinit_id" {
-  description = "The ID of the cloud-init disk"
-  value       = libvirt_cloudinit_disk.commoninit.id
-}
 
 # ============================================================================
 # DEPLOYMENT STATUS OUTPUTS
@@ -148,7 +141,7 @@ output "troubleshooting" {
     check_libvirt_logs  = "sudo journalctl -u libvirtd -n 100 --no-pager"
     restart_vm          = "virsh reboot ${local.sanitized_hostname}"
     force_restart       = "virsh destroy ${local.sanitized_hostname} && virsh start ${local.sanitized_hostname}"
-    health_check_log    = "${path.module}/.health_check.log"
+    health_check_log    = "${path.module}/logs/.health_check.log"
     cloud_init_log      = "ssh ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"} 'sudo tail -f /var/log/cloud-init-output.log'"
   }
 }
@@ -200,7 +193,7 @@ output "quick_reference" {
     
     Troubleshooting:
     ----------------
-    Health check log:    ${path.module}/.health_check.log
+    Health check log:    ${path.module}/logs/.health_check.log
     VM console:          virsh console ${local.sanitized_hostname}
     Libvirt logs:        sudo journalctl -u libvirtd -n 100
     
