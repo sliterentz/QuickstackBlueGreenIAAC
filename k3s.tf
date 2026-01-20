@@ -83,6 +83,6 @@ resource "null_resource" "wait_for_cluster" {
   depends_on = [null_resource.k3s_install]
 
   provisioner "local-exec" {
-    command = "sleep 60 && KUBECONFIG=./kubeconfig kubectl wait --for=condition=Ready nodes --all --timeout=600s"
+    command = "sleep 120 && KUBECONFIG=./kubeconfig kubectl wait --for=condition=Ready nodes --all --timeout=600s"
   }
 }

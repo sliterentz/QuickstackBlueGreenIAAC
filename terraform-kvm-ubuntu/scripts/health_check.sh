@@ -47,35 +47,37 @@ echo ""
 echo "=== Phase 0: Libvirt Connection Check ==="
 
 # Check if we can connect to libvirt
-if ! virsh version >/dev/null 2>&1; then
-  echo "✗ Cannot connect to libvirt"
-  echo "Checking libvirt service status..."
-  sudo systemctl status libvirtd --no-pager || true
-  echo ""
-  echo "Attempting to start libvirtd..."
-  sudo systemctl start libvirtd || true
-  sleep 3
+LIBVIRT_URI="qemu:///system"
+VIRSH_CMD="virsh -c $LIBVIRT_URI"
+
+if ! $VIRSH_CMD version >/dev/null 2>&1; then
+  echo "⚠ Cannot connect to libvirt as current user, trying with sudo..."
+  VIRSH_CMD="sudo virsh -c $LIBVIRT_URI"
   
-  if ! virsh version >/dev/null 2>&1; then
+  if ! $VIRSH_CMD version >/dev/null 2>&1; then
     echo "✗ Still cannot connect to libvirt"
-    exit 1
+    echo "Checking libvirt service status..."
+    sudo systemctl status libvirtd --no-pager || true
+    echo ""
+    echo "Attempting to start libvirtd..."
+    sudo systemctl start libvirtd || true
+    sleep 3
+    
+    if ! $VIRSH_CMD version >/dev/null 2>&1; then
+      echo "✗ Final attempt: Still cannot connect to libvirt"
+      exit 1
+    fi
   fi
 fi
 
 echo "✓ Libvirt connection OK"
-echo "Libvirt version: $(virsh version | head -1)"
+echo "Libvirt version: $($VIRSH_CMD version | head -1)"
 echo ""
 
 # ========================================================================
 # PHASE 1: VM EXISTENCE AND STATE CHECK
 # ========================================================================
 echo "=== Phase 1: VM Existence Check ==="
-
-VIRSH_CMD="virsh"
-if ! virsh list --all >/dev/null 2>&1; then
-  echo "⚠ Permission denied, trying with sudo..."
-  VIRSH_CMD="sudo virsh"
-fi
 
 echo "Listing all VMs..."
 $VIRSH_CMD list --all

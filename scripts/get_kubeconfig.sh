@@ -71,16 +71,16 @@ if [ -n "$KUBE_CONFIG_PATH" ]; then
     log "Pencarian selesai. Menggunakan: $KUBE_CONFIG_PATH"
     
     # Verifikasi apakah host cluster dapat dijangkau
-    SERVER_URL=$(grep "server:" "$KUBE_CONFIG_PATH" | awk '{print $2}')
-    HOST=$(echo $SERVER_URL | sed -e 's|^[^/]*//||' -e 's|:[0-9]*$||')
-    PORT=$(echo $SERVER_URL | sed -e 's|^.*:||')
+    # SERVER_URL=$(grep "server:" "$KUBE_CONFIG_PATH" | awk '{print $2}')
+    # HOST=$(echo $SERVER_URL | sed -e 's|^[^/]*//||' -e 's|:[0-9]*$||')
+    # PORT=$(echo $SERVER_URL | sed -e 's|^.*:||')
     
-    log "Memeriksa konektivitas ke $HOST:$PORT..."
-    if ! timeout 2 bash -c "true > /dev/tcp/$HOST/$PORT" 2>/dev/null; then
-        log "PERINGATAN: Cluster $HOST:$PORT tidak dapat dijangkau. Mengalihkan ke mode offline."
-        echo "{\"kube_config_path\": \"NOT_FOUND\"}"
-        exit 0
-    fi
+    # log "Memeriksa konektivitas ke $HOST:$PORT..."
+    # if ! timeout 2 bash -c "true > /dev/tcp/$HOST/$PORT" 2>/dev/null; then
+    #     log "PERINGATAN: Cluster $HOST:$PORT tidak dapat dijangkau. Mengalihkan ke mode offline."
+    #     echo "{\"kube_config_path\": \"NOT_FOUND\"}"
+    #     exit 0
+    # fi
 
     # Pastikan file dapat dibaca
     if [ ! -r "$KUBE_CONFIG_PATH" ]; then

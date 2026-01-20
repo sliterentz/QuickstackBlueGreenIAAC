@@ -7,8 +7,3 @@ terraform {
     }
   }
 }
-
-provider "libvirt" {
-  # Menggunakan koneksi sistem lokal qemu
-  uri = "qemu:///system"
-}

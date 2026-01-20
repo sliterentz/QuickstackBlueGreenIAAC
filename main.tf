@@ -45,24 +45,36 @@ provider "libvirt" {
 provider "helm" {
   kubernetes {
     config_path = local.kube_config_path
+    insecure    = true
   }
 }
 
 provider "kubernetes" {
-  config_path = local.kubeconfig_ready ? local.kube_config_path : null
-  # Jika kubeconfig belum siap, gunakan dummy host agar tidak error saat refresh
-  host = local.kubeconfig_ready ? null : "https://localhost:0"
+  config_path = local.kube_config_path
+  insecure    = true
 }
 
 provider "kubectl" {
-  config_path      = local.kubeconfig_ready ? local.kube_config_path : null
-  load_config_file = local.kubeconfig_ready
-  host             = local.kubeconfig_ready ? null : "https://localhost:0"
+  config_path      = local.kube_config_path
+  load_config_file = true
+  insecure         = true
+}
+
+# ============================================================================
+# SHARED CONFIGURATION
+# ============================================================================
+# Generate secure K3s token automatically
+resource "random_password" "k3s_token" {
+  length  = 32
+  special = false
 }
 
 # Modul untuk membuat VM di KVM
 module "kvm_ubuntu" {
   source = "./terraform-kvm-ubuntu"
+  providers = {
+    libvirt = libvirt
+  }
 
   vm_hostname    = var.vm_hostname
   vm_memory      = var.vm_memory
@@ -80,8 +92,48 @@ module "kvm_ubuntu" {
   k3s_version      = var.k3s_version
   k3s_node_role    = var.k3s_node_role
   k3s_server_url   = var.k3s_server_url
-  k3s_token        = var.k3s_token
+  # Use generated token if not provided in vars
+  k3s_token        = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
   cpu_mode       = var.cpu_mode
+}
+
+# ============================================================================
+# N8N WORKER NODES
+# ============================================================================
+module "n8n_worker" {
+  source = "./terraform-kvm-ubuntu"
+  count  = var.worker_n8n_count
+  providers = {
+    libvirt = libvirt
+  }
+
+  vm_hostname    = "${var.worker_n8n_hostname}-${count.index + 1}"
+  vm_memory      = var.worker_n8n_memory
+  vm_vcpu        = var.worker_n8n_vcpu
+  vm_disk_size   = var.vm_disk_size
+  
+  # Static IP Allocation: Increment from start IP
+  # Example: 192.168.122.251/24 -> .251, .252, etc.
+  vm_ip_address  = "${cidrhost(var.worker_n8n_ip_start, tonumber(split(".", split("/", var.worker_n8n_ip_start)[0])[3]) + count.index)}/24"
+  vm_gateway     = var.vm_gateway
+  vm_nameservers = var.vm_nameservers
+  
+  libvirt_pool_name   = var.libvirt_pool_name
+  libvirt_domain_type = var.libvirt_domain_type
+  ubuntu_img_url      = var.ubuntu_img_url
+  network_name        = var.network_name
+  ssh_public_key      = "${var.ssh_private_key_path}.pub"
+  ssh_username        = var.ssh_username
+  cpu_mode            = var.cpu_mode
+
+  # K3s Agent Configuration
+  k3s_version      = var.k3s_version
+  k3s_node_role    = "agent"
+  # Connect to Master Node IP
+  k3s_server_url   = "https://${split("/", var.vm_ip_address)[0]}:6443"
+  k3s_token        = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
+
+  depends_on = [module.kvm_ubuntu]
 }
 
 # Gunakan external data source untuk memastikan kubeconfig ada sebelum provider inisialisasi

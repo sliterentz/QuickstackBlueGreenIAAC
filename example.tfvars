@@ -59,6 +59,7 @@ redis_password = "strong_db_password"
 # ============================================
 # N8N Configuration
 # ============================================
+worker_n8n_count   = 1
 n8n_hostname       = "your_n8n_domain.com"
 n8n_encryption_key = "strong_encription_key"
 n8n_db_host        = ""

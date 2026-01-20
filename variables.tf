@@ -197,6 +197,7 @@ variable "n8n_hpa_max_replicas" {
 }
 
 # ============================================
+# ============================================
 # General Configuration Variables
 # ============================================
 variable "GENERIC_TIMEZONE" {
@@ -412,4 +413,37 @@ variable "whatsapp_bussiness_account_id" {
   description = "Whatsapp Business Account ID"
   type        = string
   default     = ""
+}
+
+# ============================================
+# Worker Node Configuration (N8N)
+# ============================================
+variable "worker_n8n_count" {
+  description = "Number of N8N worker nodes"
+  type        = number
+  default     = 1
+}
+
+variable "worker_n8n_hostname" {
+  description = "Hostname prefix for N8N worker nodes"
+  type        = string
+  default     = "n8n-worker"
+}
+
+variable "worker_n8n_memory" {
+  description = "Memory for N8N worker nodes (MB)"
+  type        = number
+  default     = 4096
+}
+
+variable "worker_n8n_vcpu" {
+  description = "vCPU for N8N worker nodes"
+  type        = number
+  default     = 2
+}
+
+variable "worker_n8n_ip_start" {
+  description = "Starting IP address for N8N worker nodes (must be CIDR format e.g. 192.168.122.251/24)"
+  type        = string
+  default     = "192.168.122.251/24"
 }

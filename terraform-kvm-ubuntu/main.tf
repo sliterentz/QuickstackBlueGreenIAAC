@@ -6,8 +6,8 @@
 # tanpa menyebabkan error "already exists" pada Terraform state.
 resource "null_resource" "pool_management" {
   triggers = {
-    pool_name = var.libvirt_pool_name
-    pool_path = "/var/lib/libvirt/images/${var.libvirt_pool_name}"
+    pool_name = local.pool_name
+    pool_path = "/var/lib/libvirt/images/${local.pool_name}"
   }
 
   provisioner "local-exec" {
@@ -231,7 +231,7 @@ resource "null_resource" "verify_cloudinit_cleanup" {
       echo "Timestamp: $(date)"
       
       CLOUDINIT_NAME="cloudinit-${local.sanitized_hostname}.iso"
-      POOL_NAME="${var.libvirt_pool_name}"
+      POOL_NAME="${local.pool_name}"
       VERIFICATION_FAILED=false
 
       # Wait a bit more to ensure cleanup is complete
@@ -526,19 +526,107 @@ resource "null_resource" "kvm_check" {
 # ============================================================================
 # STORAGE VOLUMES
 # ============================================================================
+
+# Download image locally to avoid libvirt provider timeout
+resource "null_resource" "download_ubuntu_image" {
+  triggers = {
+    img_url = var.ubuntu_img_url
+  }
+
+  provisioner "local-exec" {
+    command = <<EOT
+      set -e
+      # Create cache directory safely
+      CACHE_DIR="${abspath(path.module)}/.cache"
+      mkdir -p "$CACHE_DIR"
+      
+      IMAGE_URL="${var.ubuntu_img_url}"
+      IMAGE_NAME=$(basename "$IMAGE_URL")
+      LOCAL_PATH="$CACHE_DIR/$IMAGE_NAME"
+
+      echo "Checking for cached image at $LOCAL_PATH..."
+      if [ -f "$LOCAL_PATH" ]; then
+        echo "Image already exists in cache."
+      else
+        echo "Image not found. Downloading from $IMAGE_URL..."
+        # Download with retry and increased timeout (20 mins)
+        if command -v curl >/dev/null 2>&1; then
+          curl -L --fail --retry 5 --retry-delay 5 --max-time 1200 -o "$LOCAL_PATH" "$IMAGE_URL"
+        elif command -v wget >/dev/null 2>&1; then
+          wget --tries=5 --wait=5 --timeout=1200 -O "$LOCAL_PATH" "$IMAGE_URL"
+        else
+          echo "Error: Neither curl nor wget found."
+          exit 1
+        fi
+        echo "Download complete."
+      fi
+    EOT
+    interpreter = ["/bin/bash", "-c"]
+  }
+}
+
 resource "libvirt_volume" "ubuntu_base_img" {
   name   = "ubuntu-base-img-${local.sanitized_hostname}.qcow2"
   pool   = local.pool_name
-  source = var.ubuntu_img_url
+  # Use local file source instead of remote URL to bypass provider timeout
+  source = "${abspath(path.module)}/.cache/${basename(var.ubuntu_img_url)}"
   format = "qcow2"
 
   depends_on = [
     null_resource.pool_management,
-    null_resource.validation
+    null_resource.validation,
+    null_resource.download_ubuntu_image
   ]
 
   lifecycle {
     create_before_destroy = true
+  }
+}
+
+# Wait for volumes to be fully registered in libvirt
+resource "time_sleep" "wait_for_volumes" {
+  depends_on = [
+    libvirt_volume.ubuntu_base,
+    libvirt_volume.ubuntu_base_img,
+    libvirt_cloudinit_disk.commoninit
+  ]
+
+  create_duration = "15s"
+}
+
+# Force a pool refresh to ensure Libvirt sees the newly created volumes
+resource "null_resource" "force_pool_refresh" {
+  depends_on = [
+    time_sleep.wait_for_volumes,
+    libvirt_cloudinit_disk.commoninit
+  ]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      echo "Refreshing storage pool: ${local.pool_name}"
+      sudo virsh pool-refresh ${local.pool_name}
+      
+      # Verify all volumes are present
+      echo "Verifying volumes in pool..."
+      sudo virsh vol-list ${local.pool_name}
+      
+      # Specifically check for cloud-init ISO
+      if ! sudo virsh vol-list ${local.pool_name} | grep -q "cloudinit-${local.sanitized_hostname}.iso"; then
+        echo "ERROR: Cloud-init ISO not found in pool"
+        exit 1
+      fi
+      
+      echo "✓ All volumes verified"
+    EOT
+  }
+
+  triggers = {
+    volumes_ready = join(",", [
+      libvirt_volume.ubuntu_base.id,
+      libvirt_volume.ubuntu_base_img.id,
+      libvirt_cloudinit_disk.commoninit.id  # Tambahkan trigger ini
+    ])
   }
 }
 
@@ -573,14 +661,16 @@ resource "null_resource" "cleanup_cloudinit" {
       echo "Timestamp: $(date)"
       
       CLOUDINIT_NAME="cloudinit-${local.sanitized_hostname}.iso"
-      POOL_NAME="${var.libvirt_pool_name}"
-      MAX_RETRIES=5
+      POOL_NAME="${local.pool_name}"
+      MAX_RETRIES=10
       RETRY_COUNT=0
       CLEANUP_NEEDED=false
       CLEANUP_SUCCESS=false
       
       # Function to check if volume exists
       volume_exists() {
+        # Selalu refresh pool sebelum cek keberadaan volume
+        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1
         sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1
         return $?
       }
@@ -740,7 +830,7 @@ data "template_file" "user_data" {
 
   vars = {
     hostname       = var.vm_hostname
-    ssh_key        = file(pathexpand(var.ssh_public_key))
+    ssh_key        = can(regex("^ssh-", var.ssh_public_key)) ? var.ssh_public_key : file(pathexpand(var.ssh_public_key))
     ssh_user       = var.ssh_username
     k8s_version    = "1.31"
     static_ip      = var.vm_ip_address
@@ -782,8 +872,45 @@ resource "libvirt_cloudinit_disk" "commoninit" {
   ]
 
   lifecycle {
-    create_before_destroy = false
+    create_before_destroy = true
     replace_triggered_by = [null_resource.cleanup_cloudinit]
+  }
+}
+
+# Tambahkan explicit wait setelah cloudinit disk dibuat
+resource "time_sleep" "wait_for_cloudinit" {
+  depends_on = [libvirt_cloudinit_disk.commoninit]
+  
+  create_duration = "10s"
+}
+
+# Tambahkan null_resource untuk verifikasi file ISO
+resource "null_resource" "verify_cloudinit_iso" {
+  depends_on = [time_sleep.wait_for_cloudinit]
+  
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      ISO_PATH="/var/lib/libvirt/images/${local.pool_name}/cloudinit-${local.sanitized_hostname}.iso"
+      
+      echo "Verifying cloud-init ISO at: $ISO_PATH"
+      
+      # Wait up to 30 seconds for ISO to appear
+      for i in {1..30}; do
+        if sudo test -f "$ISO_PATH"; then
+          echo "✓ Cloud-init ISO found"
+          sudo ls -lh "$ISO_PATH"
+          exit 0
+        fi
+        echo "Waiting for ISO... ($i/30)"
+        sleep 1
+      done
+      
+      echo "✗ ERROR: Cloud-init ISO not found after 30 seconds"
+      echo "Checking pool contents:"
+      sudo virsh vol-list ${local.pool_name}
+      exit 1
+    EOT
   }
 }
 
@@ -796,14 +923,7 @@ resource "null_resource" "pre_deployment_check" {
       set +e
       
       # Step 1: Initialize logging with absolute paths
-      LOG_DIR="${path.root}/logs"
       LOG_FILE="${path.root}/logs/.cloudinit_cleanup.log"
-      
-      # Ensure log directory exists with correct permissions
-      if [ ! -d "$LOG_DIR" ]; then
-        mkdir -p "$LOG_DIR"
-        chmod 755 "$LOG_DIR"
-      fi
       
       # Redirect all output to log file
       exec > "$LOG_FILE" 2>&1
@@ -866,41 +986,44 @@ resource "null_resource" "pre_deployment_check" {
       echo ""
       echo "Checking for volume conflicts..."
       CLOUDINIT_NAME="cloudinit-${local.sanitized_hostname}.iso"
-      POOL_NAME="${var.libvirt_pool_name}"
+      DISK_NAME="ubuntu-disk-${local.sanitized_hostname}.qcow2"
+      BASE_IMG_NAME="ubuntu-base-img-${local.sanitized_hostname}.qcow2"
+      POOL_NAME="${local.pool_name}"
 
       # Refresh pool to ensure we have the latest state
       echo "Refreshing storage pool '$POOL_NAME'..."
       sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || echo "  Warning: Pool refresh failed"
       
-      if sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
-        echo "⚠ Found existing cloudinit volume: $CLOUDINIT_NAME"
-        echo "  Attempting to resolve conflict..."
-        
-        # Check if any VM is using it
-        USING_VM=$(sudo virsh list --all --name | while read vm; do
-          if [ -n "$vm" ] && sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
-            echo "$vm"
-            break
+      for VOL in "$CLOUDINIT_NAME" "$DISK_NAME" "$BASE_IMG_NAME"; do
+        if sudo virsh vol-info "$VOL" --pool "$POOL_NAME" >/dev/null 2>&1; then
+          echo "⚠ Found existing volume: $VOL"
+          echo "  Attempting to resolve conflict..."
+          
+          # Check if any VM is using it
+          USING_VM=$(sudo virsh list --all --name | while read vm; do
+            if [ -n "$vm" ] && sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$VOL"; then
+              echo "$vm"
+              break
+            fi
+          done)
+          
+          if [ -n "$USING_VM" ]; then
+            echo "  Volume is in use by VM: $USING_VM"
+            echo "  Stopping and undefining VM..."
+            sudo virsh destroy "$USING_VM" 2>/dev/null || true
+            sudo virsh undefine "$USING_VM" --remove-all-storage 2>/dev/null || true
+            sleep 2
           fi
-        done)
-        
-        if [ -n "$USING_VM" ]; then
-          echo "  Volume is in use by VM: $USING_VM"
-          echo "  Stopping and undefining VM..."
-          sudo virsh destroy "$USING_VM" 2>/dev/null || true
-          sudo virsh undefine "$USING_VM" --remove-all-storage 2>/dev/null || true
-          sleep 2
+          
+          # Delete volume
+          if sudo virsh vol-delete "$VOL" --pool "$POOL_NAME" 2>/dev/null; then
+            echo "  ✓ Volume $VOL deleted successfully"
+          else
+            echo "  ⚠ Failed to delete volume $VOL (might be in use or partially deleted)"
+            # Don't exit here, maybe Terraform can handle it or other volumes can be cleaned
+          fi
         fi
-        
-        # Delete volume
-        if sudo virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null; then
-          echo "  ✓ Volume deleted successfully"
-        else
-          log_error "Failed to delete conflicting volume: $CLOUDINIT_NAME"
-          log_error "Manual fix: virsh vol-delete $CLOUDINIT_NAME --pool $POOL_NAME"
-          exit 1
-        fi
-      fi
+      done
       
       # Step 6: Check for existing domain
       echo ""
@@ -1075,8 +1198,12 @@ resource "libvirt_domain" "ubuntu_vm" {
 
   # Dependencies - FIXED: Strict ordering to avoid race conditions with cloudinit ISO
   depends_on = [
+    null_resource.verify_cloudinit_iso,
     libvirt_volume.ubuntu_base,
+    libvirt_volume.ubuntu_base_img,
     libvirt_cloudinit_disk.commoninit,
+    time_sleep.wait_for_volumes,
+    null_resource.force_pool_refresh,
     null_resource.validation,
     null_resource.kvm_check,
     null_resource.detect_virtualization,
@@ -1090,7 +1217,7 @@ resource "libvirt_domain" "ubuntu_vm" {
     # Prevent accidental destruction
     prevent_destroy = false
     # Create before destroy to minimize downtime
-    create_before_destroy = false
+    create_before_destroy = true
     ignore_changes = [
       network_interface[0].addresses,
       qemu_agent,
@@ -1121,7 +1248,7 @@ resource "null_resource" "health_check" {
         "${local.node_ip}" \
         "${var.ssh_username}" \
         "${var.network_name}" \
-        "${var.libvirt_pool_name}"
+        "${local.pool_name}"
     EOT
 
     interpreter = ["/bin/bash", "-c"]
@@ -1156,5 +1283,31 @@ resource "null_resource" "wait_for_ssh" {
 
   triggers = {
     vm_id = libvirt_domain.ubuntu_vm.id
+  }
+}
+
+# ============================================================================
+# K3S API READINESS CHECK
+# ============================================================================
+resource "null_resource" "wait_for_k3s" {
+  count = var.k3s_node_role == "server" ? 1 : 0
+  depends_on = [null_resource.wait_for_ssh]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      echo "Waiting for K3s API to be ready at ${local.node_ip}:6443..."
+      # Wait up to 5 minutes
+      for i in {1..60}; do
+        if timeout 2 bash -c "</dev/tcp/${local.node_ip}/6443" 2>/dev/null; then
+          echo "✅ K3s API is up and reachable!"
+          exit 0
+        fi
+        echo "⏳ Waiting for K3s API... ($i/60)"
+        sleep 5
+      done
+      echo "❌ Timeout waiting for K3s API"
+      exit 1
+    EOT
+    interpreter = ["/bin/bash", "-c"]
   }
 }
