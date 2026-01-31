@@ -117,6 +117,24 @@ variable "vm_nameservers" {
   default     = ["8.8.8.8", "8.8.4.4"]
 }
 
+variable "vm_interface_name" {
+  description = "Nama interface utama di guest untuk netplan (default ens3)"
+  type        = string
+  default     = "ens3"
+}
+
+variable "vm_interface_match" {
+  description = "Pattern match interface untuk netplan (contoh: en*). Kosong untuk tanpa match."
+  type        = string
+  default     = ""
+}
+
+variable "extra_hosts_entries" {
+  description = "Tambahan entri /etc/hosts (format: \"IP hostname\" per item)"
+  type        = list(string)
+  default     = []
+}
+
 variable "vm_mac_address" {
   description = "MAC address untuk VM network interface (kosong untuk auto-generate)"
   type        = string
@@ -167,6 +185,18 @@ variable "libvirt_domain_type" {
   }
 }
 
+variable "volume_create_timeout" {
+  description = "Timeout for volume creation (including image download)"
+  type        = string
+  default     = ""
+}
+
+variable "volume_delete_timeout" {
+  description = "Timeout for volume deletion"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # DEPLOYMENT BEHAVIOR VARIABLES
 # ============================================================================
@@ -180,6 +210,17 @@ variable "ssh_timeout" {
   description = "Maximum time to wait for SSH in seconds"
   type        = number
   default     = 600
+}
+
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key for accessing the VM"
+  type        = string
+  default     = "~/.ssh/id_rsa"  # Default SSH key path
+  
+  validation {
+    condition     = can(regex("^[~/].*", var.ssh_private_key_path))
+    error_message = "SSH private key path must be an absolute path or start with ~/"
+  }
 }
 
 # ============================================

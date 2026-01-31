@@ -18,7 +18,7 @@ log() {
 }
 
 # Inisialisasi variabel path
-KUBE_CONFIG_PATH="./kubeconfig"
+KUBE_CONFIG_PATH=""
 HOME_DIR="${HOME:-/home/ubuntu}" # Default ke /home/ubuntu jika HOME tidak set
 
 log "Memulai pencarian file kubeconfig..."

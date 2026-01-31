@@ -6,7 +6,7 @@ resource "kubernetes_namespace" "argocd" {
 
   metadata {
     name = var.argocd_namespace
-    
+
     labels = merge(
       {
         "name"       = var.argocd_namespace
@@ -68,13 +68,13 @@ resource "helm_release" "argocd" {
 resource "kubectl_manifest" "argocd_server_hpa" {
   count      = var.deploy_argocd && var.argocd_enable_hpa ? 1 : 0
   depends_on = [helm_release.argocd]
-  
+
   yaml_body = templatefile("${path.module}/templates/argocd-server-hpa.yaml.tpl", {
-    namespace         = var.argocd_namespace
-    min_replicas      = var.argocd_hpa_min_replicas
-    max_replicas      = var.argocd_hpa_max_replicas
-    cpu_threshold     = var.argocd_hpa_cpu_threshold
-    memory_threshold  = var.argocd_hpa_memory_threshold
+    namespace        = var.argocd_namespace
+    min_replicas     = var.argocd_hpa_min_replicas
+    max_replicas     = var.argocd_hpa_max_replicas
+    cpu_threshold    = var.argocd_hpa_cpu_threshold
+    memory_threshold = var.argocd_hpa_memory_threshold
   })
 }
 
@@ -82,13 +82,13 @@ resource "kubectl_manifest" "argocd_server_hpa" {
 resource "kubectl_manifest" "argocd_repo_server_hpa" {
   count      = var.deploy_argocd && var.argocd_enable_hpa ? 1 : 0
   depends_on = [helm_release.argocd]
-  
+
   yaml_body = templatefile("${path.module}/templates/argocd-repo-server-hpa.yaml.tpl", {
-    namespace         = var.argocd_namespace
-    min_replicas      = var.argocd_hpa_min_replicas
-    max_replicas      = var.argocd_hpa_max_replicas
-    cpu_threshold     = var.argocd_hpa_cpu_threshold
-    memory_threshold  = var.argocd_hpa_memory_threshold
+    namespace        = var.argocd_namespace
+    min_replicas     = var.argocd_hpa_min_replicas
+    max_replicas     = var.argocd_hpa_max_replicas
+    cpu_threshold    = var.argocd_hpa_cpu_threshold
+    memory_threshold = var.argocd_hpa_memory_threshold
   })
 }
 
@@ -129,7 +129,7 @@ resource "kubernetes_secret" "argocd_tls" {
   metadata {
     name      = var.argocd_tls_secret_name
     namespace = var.argocd_namespace
-    
+
     labels = merge(
       {
         "app.kubernetes.io/name"       = "argocd"
@@ -156,7 +156,7 @@ resource "kubernetes_ingress_v1" "argocd_ingress" {
   metadata {
     name      = "argocd-server-ingress"
     namespace = var.argocd_namespace
-    
+
     annotations = merge(
       {
         "traefik.ingress.kubernetes.io/router.entrypoints" = "websecure"
@@ -164,7 +164,7 @@ resource "kubernetes_ingress_v1" "argocd_ingress" {
       },
       var.argocd_additional_annotations
     )
-    
+
     labels = merge(
       {
         "app.kubernetes.io/name"       = "argocd"
@@ -258,22 +258,22 @@ YAML
 output "argocd_info" {
   description = "ArgoCD deployment information"
   value = var.deploy_argocd ? {
-    deployed          = true
-    namespace         = var.argocd_namespace
-    version           = var.argocd_version
-    hostname          = var.argocd_hostname
-    ingress_enabled   = var.argocd_enable_ingress
-    tls_enabled       = var.argocd_enable_tls
-    hpa_enabled       = var.argocd_enable_hpa
-    server_replicas   = var.argocd_server_replicas
-    repo_replicas     = var.argocd_repo_server_replicas
-    admin_username    = "admin"
-    access_url        = var.argocd_enable_ingress ? "https://${var.argocd_hostname}" : "Use port-forward: kubectl port-forward svc/argocd-server -n ${var.argocd_namespace} 8080:443"
-  } : {
+    deployed        = true
+    namespace       = var.argocd_namespace
+    version         = var.argocd_version
+    hostname        = var.argocd_hostname
+    ingress_enabled = var.argocd_enable_ingress
+    tls_enabled     = var.argocd_enable_tls
+    hpa_enabled     = var.argocd_enable_hpa
+    server_replicas = var.argocd_server_replicas
+    repo_replicas   = var.argocd_repo_server_replicas
+    admin_username  = "admin"
+    access_url      = var.argocd_enable_ingress ? "https://${var.argocd_hostname}" : "Use port-forward: kubectl port-forward svc/argocd-server -n ${var.argocd_namespace} 8080:443"
+    } : {
     deployed = false
     message  = "ArgoCD deployment is disabled. Set deploy_argocd = true to enable."
   }
-  
+
   sensitive = false
 }
 

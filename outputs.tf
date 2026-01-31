@@ -35,7 +35,7 @@ output "vm_connection_info" {
 output "vm_management_commands" {
   description = "Useful commands for managing the VM"
   value = {
-    console_access  = "virsh console ${local.sanitized_hostname}"
+    console_access = "virsh console ${local.sanitized_hostname}"
     vm_info        = "virsh dominfo ${local.sanitized_hostname}"
     vm_status      = "virsh domstate ${local.sanitized_hostname}"
     get_ip         = "virsh domifaddr ${local.sanitized_hostname}"
@@ -48,12 +48,12 @@ output "vm_management_commands" {
 output "troubleshooting_info" {
   description = "Troubleshooting information and log locations"
   value = {
-    health_check_log       = "${path.module}/logs/.health_check.log"
-    virt_detection_log     = "${path.module}/logs/.virt_detection.log"
-    cloudinit_cleanup_log  = "${path.module}/logs/.cloudinit_cleanup.log"
+    health_check_log           = "${path.module}/logs/.health_check.log"
+    virt_detection_log         = "${path.module}/logs/.virt_detection.log"
+    cloudinit_cleanup_log      = "${path.module}/logs/.cloudinit_cleanup.log"
     cloudinit_verification_log = "${path.module}/logs/.cloudinit_verification.log"
     pre_deployment_check_log   = "${path.module}/logs/.pre_deployment_check.log"
-    view_logs_command      = "tail -f ${path.module}/logs/.health_check.log"
+    view_logs_command          = "tail -f ${path.module}/logs/.health_check.log"
   }
 }
 
@@ -112,12 +112,12 @@ output "storage_pool" {
 output "deployment_status" {
   description = "Deployment status and next steps"
   value = {
-    vm_created     = true
-    vm_name        = local.sanitized_hostname
-    ip_configured  = var.vm_ip_address != "" ? true : false
-    ip_address     = local.node_ip != "" ? local.node_ip : "DHCP - check with: virsh domifaddr ${local.sanitized_hostname}"
-    ssh_ready      = "Check with: ssh -o ConnectTimeout=5 ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"} 'echo OK'"
-    next_steps     = [
+    vm_created    = true
+    vm_name       = local.sanitized_hostname
+    ip_configured = var.vm_ip_address != "" ? true : false
+    ip_address    = local.node_ip != "" ? local.node_ip : "DHCP - check with: virsh domifaddr ${local.sanitized_hostname}"
+    ssh_ready     = "Check with: ssh -o ConnectTimeout=5 ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"} 'echo OK'"
+    next_steps = [
       "1. Wait 2-5 minutes for cloud-init to complete",
       "2. Check VM IP: virsh domifaddr ${local.sanitized_hostname}",
       "3. Connect via SSH: ssh ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"}",
@@ -133,16 +133,16 @@ output "deployment_status" {
 output "troubleshooting" {
   description = "Troubleshooting commands and information"
   value = {
-    check_vm_status     = "virsh domstate ${local.sanitized_hostname}"
-    check_vm_info       = "virsh dominfo ${local.sanitized_hostname}"
-    access_console      = "virsh console ${local.sanitized_hostname}"
-    check_ip_address    = "virsh domifaddr ${local.sanitized_hostname}"
-    check_network       = "virsh net-list --all && virsh net-info ${var.network_name}"
-    check_libvirt_logs  = "sudo journalctl -u libvirtd -n 100 --no-pager"
-    restart_vm          = "virsh reboot ${local.sanitized_hostname}"
-    force_restart       = "virsh destroy ${local.sanitized_hostname} && virsh start ${local.sanitized_hostname}"
-    health_check_log    = "${path.module}/logs/.health_check.log"
-    cloud_init_log      = "ssh ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"} 'sudo tail -f /var/log/cloud-init-output.log'"
+    check_vm_status    = "virsh domstate ${local.sanitized_hostname}"
+    check_vm_info      = "virsh dominfo ${local.sanitized_hostname}"
+    access_console     = "virsh console ${local.sanitized_hostname}"
+    check_ip_address   = "virsh domifaddr ${local.sanitized_hostname}"
+    check_network      = "virsh net-list --all && virsh net-info ${var.network_name}"
+    check_libvirt_logs = "sudo journalctl -u libvirtd -n 100 --no-pager"
+    restart_vm         = "virsh reboot ${local.sanitized_hostname}"
+    force_restart      = "virsh destroy ${local.sanitized_hostname} && virsh start ${local.sanitized_hostname}"
+    health_check_log   = "${path.module}/logs/.health_check.log"
+    cloud_init_log     = "ssh ${var.ssh_username}@${local.node_ip != "" ? local.node_ip : "<IP>"} 'sudo tail -f /var/log/cloud-init-output.log'"
   }
 }
 
@@ -151,7 +151,7 @@ output "troubleshooting" {
 # ============================================================================
 output "quick_reference" {
   description = "Quick reference for common operations"
-  value = <<-EOT
+  value       = <<-EOT
     ╔════════════════════════════════════════════════════════════════════════╗
     ║                    VM DEPLOYMENT SUCCESSFUL                            ║
     ╚════════════════════════════════════════════════════════════════════════╝

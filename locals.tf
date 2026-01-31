@@ -4,7 +4,7 @@
 # Centralized locals for the entire project
 locals {
   namespaces = var.enable_blue_environment ? ["${var.k3s_default_namespace}-blue", "${var.k3s_default_namespace}-green"] : ["${var.k3s_default_namespace}-green"]
-  
+
   # Sanitize hostname untuk kompatibilitas dengan libvirt
   sanitized_hostname = replace(lower(var.vm_hostname), "_", "-")
   # Extract IP address dari CIDR notation jika ada
@@ -18,11 +18,11 @@ locals {
 
   # Detect virtualization type dari file yang dibuat oleh null_resource
   virt_type_file = "${path.module}/.virt_type"
-  domain_type = fileexists(local.virt_type_file) ? trimspace(file(local.virt_type_file)) : "qemu"
+  domain_type    = fileexists(local.virt_type_file) ? trimspace(file(local.virt_type_file)) : "qemu"
 
   # Detect emulator path
-  emulator_file      = "${path.module}/.emulator_path"
-  detected_emulator  = fileexists(local.emulator_file) ? trimspace(file(local.emulator_file)) : ""
+  emulator_file     = "${path.module}/.emulator_path"
+  detected_emulator = fileexists(local.emulator_file) ? trimspace(file(local.emulator_file)) : ""
 
   # CPU mode berdasarkan domain type
   effective_cpu_mode = local.domain_type == "kvm" ? "host-passthrough" : "custom"
@@ -47,12 +47,12 @@ locals {
   # Validation flags
   has_static_ip = var.vm_ip_address != ""
   is_k3s_agent  = var.k3s_node_role == "agent"
-  
+
   # K3s configuration validation
   k3s_config_valid = local.is_k3s_agent ? (
     var.k3s_server_url != "" && var.k3s_token != ""
   ) : true
-  
+
   # Database configurations
   databases = {
     postgres = {

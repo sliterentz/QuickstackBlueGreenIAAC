@@ -223,7 +223,7 @@ verify_storage_volumes() {
     
     for vol_type in "${volume_types[@]}"; do
         local vol_count
-        vol_count=$(sudo virsh vol-list "$pool_name" 2>/dev/null | grep -c "$vol_type" || echo "0")
+        vol_count=$(sudo virsh vol-list "$pool_name" 2>/dev/null | grep -c "$vol_type" || true)
         print_status "info" "Found $vol_count volumes of type: $vol_type"
         
         if [[ "$vol_type" == "cloudinit" && $vol_count -eq 0 ]]; then
@@ -269,6 +269,141 @@ verify_storage_volumes() {
     return 0
 }
 
+# Fungsi: Ensure Storage Pool is Ready for Volume Creation
+ensure_pool_ready_for_volumes() {
+    print_status "info" "Ensuring storage pool is ready for volume creation..."
+    
+    local pool_name="k3s_infra_pool"
+    local pool_path="/var/lib/libvirt/images/${pool_name}"
+    local max_wait=30
+    local wait_count=0
+    
+    # 1. Verify pool is active
+    while ! sudo virsh pool-list | grep -q "$pool_name.*active"; do
+        if [[ $wait_count -ge $max_wait ]]; then
+            print_status "error" "Storage pool failed to become active"
+            return 1
+        fi
+        
+        print_status "info" "Waiting for pool to become active... ($wait_count/$max_wait)"
+        sleep 2
+        ((wait_count++))
+    done
+    
+    print_status "success" "Storage pool is active"
+    
+    # 2. Verify pool path permissions
+    print_status "info" "Verifying pool path permissions..."
+    if [[ ! -d "$pool_path" ]]; then
+        print_status "warn" "Pool path doesn't exist, creating..."
+        sudo mkdir -p "$pool_path" || return 1
+    fi
+    
+    # Set proper permissions for libvirt
+    sudo chown -R libvirt-qemu:kvm "$pool_path" 2>/dev/null || \
+    sudo chown -R qemu:kvm "$pool_path" 2>/dev/null || \
+    print_status "warn" "Could not set ownership (may not be critical)"
+    
+    sudo chmod 755 "$pool_path" || return 1
+    
+    # 3. Verify pool has available space
+    local available_space
+    available_space=$(sudo virsh pool-info "$pool_name" | grep "Available:" | awk '{print $2}' | sed 's/[^0-9.]//g')
+    
+    if [[ -z "$available_space" ]] || awk -v val="$available_space" 'BEGIN {exit !(val < 10)}'; then
+        print_status "error" "Insufficient storage space in pool (need at least 10GB)"
+        return 1
+    fi
+    
+    print_status "info" "Available space: ${available_space}GB"
+    
+    # 4. Test write permission by creating a test file
+    print_status "info" "Testing write permissions..."
+    local test_file="${pool_path}/.test_write_$$"
+    if sudo touch "$test_file" 2>/dev/null; then
+        sudo rm -f "$test_file"
+        print_status "success" "Write permissions verified"
+    else
+        print_status "error" "Cannot write to pool path"
+        return 1
+    fi
+    
+    # 5. Refresh pool to ensure sync
+    print_status "info" "Refreshing pool state..."
+    sudo virsh pool-refresh "$pool_name" >> "$LOG_FILE" 2>&1 || {
+        print_status "warn" "Pool refresh failed (non-critical)"
+    }
+    
+    # 6. Wait a bit for pool to stabilize
+    print_status "info" "Allowing pool to stabilize..."
+    sleep 3
+    
+    print_status "success" "Storage pool is ready for volume creation"
+    return 0
+}
+
+# Fungsi: Pre-create Base Image Volume (jika belum ada)
+precreate_base_image_volume() {
+    print_status "info" "Checking for existing base image volume..."
+    
+    local pool_name="k3s_infra_pool"
+    local base_vol_name="ubuntu-base-img"
+    
+    # Check if base volume already exists
+    if sudo virsh vol-list "$pool_name" 2>/dev/null | grep -q "$base_vol_name"; then
+        print_status "info" "Base image volume already exists"
+        
+        # Verify volume is accessible
+        local vol_path
+        vol_path=$(sudo virsh vol-path "$base_vol_name" --pool "$pool_name" 2>/dev/null)
+        
+        if [[ -n "$vol_path" ]] && [[ -f "$vol_path" ]]; then
+            local vol_size
+            vol_size=$(sudo ls -lh "$vol_path" | awk '{print $5}')
+            print_status "success" "Base image verified: $vol_path ($vol_size)"
+            return 0
+        else
+            print_status "warn" "Base image exists in pool but file not found, cleaning up..."
+            sudo virsh vol-delete "$base_vol_name" --pool "$pool_name" 2>/dev/null || true
+        fi
+    fi
+    
+    print_status "info" "Base image volume will be created by Terraform"
+    return 0
+}
+
+# Fungsi: Verify Network Connectivity for Image Download
+verify_network_for_download() {
+    print_status "info" "Verifying network connectivity for image download..."
+    
+    local ubuntu_mirror="cloud-images.ubuntu.com"
+    local max_retries=3
+    local retry=0
+    
+    while [[ $retry -lt $max_retries ]]; do
+        if ping -c 2 -W 5 "$ubuntu_mirror" &>/dev/null; then
+            print_status "success" "Network connectivity to Ubuntu mirror verified"
+            return 0
+        fi
+        
+        ((retry++))
+        if [[ $retry -lt $max_retries ]]; then
+            print_status "warn" "Network check failed, retrying... ($retry/$max_retries)"
+            sleep 3
+        fi
+    done
+    
+    print_status "error" "Cannot reach Ubuntu cloud images mirror"
+    print_status "info" "This may cause timeout during base image download"
+    
+    read -p "Continue anyway? (yes/no): " -r
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
 # Fungsi: Rotasi Log
 rotate_logs() {
     find "$LOG_DIR" -name "terraform-deployment-*.log" -mtime +7 -exec rm -f {} \; >> "$LOG_FILE" 2>&1 || true
@@ -285,6 +420,69 @@ check_prereqs() {
     if ! command -v terraform &> /dev/null; then
         handle_error 1 "Check Terraform Command"
     fi
+}
+
+# Fungsi: Cleanup Partial Volumes
+cleanup_partial_volumes() {
+    print_status "info" "Cleaning up partial volumes..."
+    
+    local pool_name="k3s_infra_pool"
+    
+    # Get hostname from tfvars
+    local hostname
+    hostname=$(grep "^vm_hostname" "$VAR_FILE" | cut -d'"' -f2 | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-')
+    
+    if [[ -z "$hostname" ]]; then
+        print_status "warn" "Could not determine hostname for cleanup"
+        return 1
+    fi
+    
+    # List of volumes to check and clean
+    local volumes=(
+        "ubuntu-base-img-${hostname}.qcow2"
+        "ubuntu-disk-${hostname}.qcow2"
+        "cloudinit-${hostname}.iso"
+    )
+    
+    for vol in "${volumes[@]}"; do
+        if sudo virsh vol-info "$vol" --pool "$pool_name" &>/dev/null; then
+            print_status "info" "Removing partial volume: $vol"
+            sudo virsh vol-delete "$vol" --pool "$pool_name" 2>/dev/null || true
+        fi
+    done
+    
+    # Refresh pool
+    sudo virsh pool-refresh "$pool_name" &>/dev/null || true
+    
+    print_status "success" "Partial volume cleanup complete"
+}
+
+# Fungsi: Import Existing Resources
+import_existing_resources() {
+    print_status "info" "Attempting to import existing resources..."
+    
+    local hostname
+    hostname=$(grep "^vm_hostname" "$VAR_FILE" | cut -d'"' -f2 | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-')
+    
+    if [[ -z "$hostname" ]]; then
+        print_status "warn" "Could not determine hostname for import"
+        return 1
+    fi
+    
+    # Check if domain exists in libvirt but not in Terraform state
+    if sudo virsh dominfo "$hostname" &>/dev/null; then
+        if ! terraform state list 2>/dev/null | grep -q "libvirt_domain.ubuntu_vm"; then
+            print_status "info" "Importing existing domain: $hostname"
+            terraform import \
+                -var-file="$VAR_FILE" \
+                "module.kvm_ubuntu.libvirt_domain.ubuntu_vm" \
+                "$hostname" >> "$LOG_FILE" 2>&1 || {
+                print_status "warn" "Failed to import domain (may not be critical)"
+            }
+        fi
+    fi
+    
+    print_status "success" "Resource import check complete"
 }
 
 # Fungsi: Cleanup Failed Resources (Lanjutan)
@@ -450,6 +648,121 @@ verify_terraform_state() {
     return 0
 }
 
+# Fungsi: Reconcile Libvirt State Drift
+reconcile_libvirt_state() {
+    print_status "info" "Reconciling Libvirt volumes with Terraform state..."
+
+    if [[ ! -f "$PROJECT_ROOT/terraform.tfstate" ]]; then
+        print_status "info" "No Terraform state file found, skipping reconciliation"
+        return 0
+    fi
+
+    local pool_name="k3s_infra_pool"
+    local targets
+
+    targets=$(terraform state list 2>/dev/null | grep -E 'libvirt_cloudinit_disk\.commoninit$|libvirt_volume\.(ubuntu_base|ubuntu_base_img)$' || true)
+    if [[ -z "$targets" ]]; then
+        print_status "info" "No tracked libvirt volumes found in state, skipping reconciliation"
+        return 0
+    fi
+
+    while read -r addr; do
+        [[ -z "$addr" ]] && continue
+
+        local vol_name
+        vol_name=$(terraform state show -no-color "$addr" 2>/dev/null | awk -F'=' '/^[[:space:]]*name[[:space:]]*=/{gsub(/[[:space:]]|"|\r/,"",$2); print $2; exit}')
+        if [[ -z "$vol_name" ]]; then
+            continue
+        fi
+
+        if ! sudo virsh vol-info "$vol_name" --pool "$pool_name" >/dev/null 2>&1; then
+            print_status "warn" "State drift detected: $addr ($vol_name) missing in pool '$pool_name'. Removing from state..."
+            terraform state rm "$addr" >> "$LOG_FILE" 2>&1 || {
+                print_status "warn" "Failed to remove $addr from state (non-fatal)"
+            }
+        fi
+    done <<< "$targets"
+
+    print_status "success" "Libvirt state reconciliation completed"
+    return 0
+}
+
+# Fungsi: Reconcile Libvirt Domain Drift
+reconcile_libvirt_domain_state() {
+    print_status "info" "Reconciling Libvirt domains with Terraform state..."
+
+    if [[ ! -f "$PROJECT_ROOT/terraform.tfstate" ]]; then
+        print_status "info" "No Terraform state file found, skipping domain reconciliation"
+        return 0
+    fi
+
+    local hostname
+    hostname=$(grep "^vm_hostname" "$VAR_FILE" | cut -d'"' -f2 | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' || true)
+    if [[ -z "$hostname" ]]; then
+        print_status "warn" "Could not determine vm_hostname for domain reconciliation"
+        return 0
+    fi
+
+    local addr="module.kvm_ubuntu.libvirt_domain.ubuntu_vm"
+    if sudo virsh dominfo "$hostname" >/dev/null 2>&1; then
+        if terraform state list 2>/dev/null | grep -qx "$addr"; then
+            print_status "info" "Libvirt domain exists and is already tracked in state: $hostname"
+            return 0
+        fi
+
+        print_status "warn" "Libvirt domain exists but is not tracked in Terraform state: $hostname"
+        print_status "info" "Attempting to import domain into state..."
+
+        if terraform import -var-file="$VAR_FILE" "$addr" "$hostname" >> "$LOG_FILE" 2>&1; then
+            print_status "success" "Domain imported into state: $hostname"
+            return 0
+        fi
+
+        print_status "warn" "Domain import failed. Attempting cleanup to allow recreation..."
+
+        if sudo virsh domstate "$hostname" 2>/dev/null | grep -qi "running"; then
+            print_status "info" "Stopping running domain to release disk locks: $hostname"
+            sudo virsh destroy "$hostname" >> "$LOG_FILE" 2>&1 || true
+            sleep 3
+        fi
+
+        sudo virsh undefine "$hostname" >> "$LOG_FILE" 2>&1 || true
+        print_status "success" "Domain cleanup completed: $hostname"
+    else
+        print_status "info" "No existing libvirt domain found for: $hostname"
+    fi
+
+    return 0
+}
+
+# Fungsi: Verify Kubeconfig Status
+verify_kubeconfig_status() {
+    print_status "info" "Verifying Kubernetes configuration status..."
+    
+    local kube_config_path="${PROJECT_ROOT}/kubeconfig"
+    local default_kube_path="${HOME}/.kube/config"
+    local k3s_kube_path="/etc/rancher/k3s/k3s.yaml"
+    
+    if [[ -n "${KUBECONFIG:-}" ]]; then
+         print_status "info" "Using KUBECONFIG env var: $KUBECONFIG"
+    elif [[ -f "$kube_config_path" ]]; then
+        print_status "info" "Found local kubeconfig: $kube_config_path"
+        # Check validity (basic check)
+        if grep -q "current-context" "$kube_config_path"; then
+             print_status "info" "  Config appears valid (has current-context)"
+        else
+             print_status "warn" "  Config might be invalid or incomplete"
+        fi
+    elif [[ -f "$default_kube_path" ]]; then
+        print_status "info" "Found default kubeconfig: $default_kube_path"
+    elif [[ -f "$k3s_kube_path" ]]; then
+        print_status "info" "Found K3s kubeconfig: $k3s_kube_path"
+    else
+        print_status "info" "No existing kubeconfig found (expected for fresh install)"
+    fi
+    
+    return 0
+}
 
 # Fungsi: Pre-deployment Checks (Comprehensive)
 comprehensive_preflight_checks() {
@@ -516,8 +829,20 @@ comprehensive_preflight_checks() {
     # 7. Storage Volumes
     verify_storage_volumes || checks_passed=false
     
-    # 8. Terraform State
+    # 8. NEW: Ensure pool is ready for volume creation
+    ensure_pool_ready_for_volumes || checks_passed=false
+    
+    # 9. NEW: Pre-check base image volume
+    precreate_base_image_volume || checks_passed=false
+    
+    # 10. NEW: Verify network connectivity
+    verify_network_for_download || checks_passed=false
+
+    # 11. Terraform State
     verify_terraform_state || checks_passed=false
+    
+    # 12. Kubernetes Configuration
+    verify_kubeconfig_status || checks_passed=false
     
     # Final verdict
     if [[ "$checks_passed" == "true" ]]; then
@@ -582,49 +907,111 @@ post_deployment_verification() {
 
 # Fungsi: Terraform Apply with Retry and Better Error Handling
 terraform_apply_with_retry() {
-    local max_attempts=3
-    local attempt=1
+    local max_retries=3
+    local retry_count=0
+    local success=false
+
+    print_status "info" "Starting Terraform apply with retry logic..."
     
-    while [[ $attempt -le $max_attempts ]]; do
-        print_status "info" "Terraform apply attempt $attempt/$max_attempts"
+    while [[ $retry_count -lt $max_retries ]]; do
+        print_status "info" "Apply attempt $((retry_count + 1))/$max_retries"
+
+        if [[ $retry_count -gt 0 ]]; then
+            print_status "info" "Recreating Terraform plan for retry..."
+            terraform plan \
+                -var-file="$VAR_FILE" \
+                -out="$PLAN_FILE" \
+                -input=false \
+                -compact-warnings >> "$LOG_FILE" 2>&1 || {
+                print_status "error" "Terraform plan failed during retry"
+                return 1
+            }
+        fi
         
-        # Capture both stdout and stderr
-        local apply_output
-        local apply_exit_code
-        
-        if apply_output=$(terraform apply -auto-approve "$PLAN_FILE" 2>&1); then
-            print_status "success" "Terraform apply succeeded"
-            echo "$apply_output" >> "$LOG_FILE"
-            return 0
+        if terraform apply \
+            -var-file="$VAR_FILE" \
+            -auto-approve \
+            -parallelism=1 \
+            "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"; then
+            
+            success=true
+            print_status "success" "Terraform apply completed successfully"
+            break
         else
-            apply_exit_code=$?
-            echo "$apply_output" >> "$LOG_FILE"
-            print_status "warn" "Terraform apply failed (attempt $attempt/$max_attempts)"
+            local exit_code=$?
+            ((retry_count++))
             
-            # Check for specific errors
-            if echo "$apply_output" | grep -q "Storage volume not found"; then
-                print_status "info" "Detected storage volume issue, cleaning up..."
-                cleanup_failed_resources
-            elif echo "$apply_output" | grep -q "domain already exists"; then
-                print_status "info" "Detected existing domain, attempting cleanup..."
-                cleanup_existing_domains
-            fi
+            print_status "error" "Terraform apply failed (attempt $retry_count/$max_retries)"
             
-            if [[ $attempt -lt $max_attempts ]]; then
-                print_status "info" "Waiting 5 seconds before retry..."
-                sleep 5
+            if [[ $retry_count -lt $max_retries ]]; then
+                print_status "info" "Analyzing failure and preparing retry..."
                 
-                # Refresh pool before retry
-                print_status "info" "Refreshing storage pool..."
-                sudo virsh pool-refresh "k3s_infra_pool" 2>/dev/null || true
+                # Check for specific errors
+                if grep -q "timeout while waiting for state to become 'EXISTS'" "$LOG_FILE"; then
+                    print_status "warn" "Detected volume creation timeout"
+                    print_status "info" "Cleaning up partial resources..."
+                    
+                    # Cleanup partial volumes
+                    cleanup_partial_volumes
+                    
+                    # Wait before retry
+                    local wait_time=$((retry_count * 30))
+                    print_status "info" "Waiting ${wait_time}s before retry..."
+                    sleep $wait_time
+                    
+                elif grep -q "exists already" "$LOG_FILE" && grep -q "libvirt_cloudinit_disk" "$LOG_FILE"; then
+                    print_status "warn" "Detected existing cloudinit volume conflict"
+                    print_status "info" "Attempting to remove conflicting cloudinit volumes..."
+                    
+                    # Extract volume name if possible, or run general cleanup
+                    local pool_name="k3s_infra_pool"
+                    # Try to find the specific volume name from the log
+                    local vol_name=$(grep -o "cloudinit-[a-zA-Z0-9-]*\.iso" "$LOG_FILE" | tail -1)
+                    
+                    if [[ -n "$vol_name" ]]; then
+                        print_status "info" "Removing specific volume: $vol_name"
+                        sudo virsh vol-delete "$vol_name" --pool "$pool_name" 2>/dev/null || true
+                    else
+                        print_status "info" "Could not extract volume name, running general cleanup..."
+                        cleanup_failed_resources
+                    fi
+                    
+                    print_status "info" "Refreshing pool..."
+                    sudo virsh pool-refresh "$pool_name" 2>/dev/null || true
+
+                elif grep -q "already exists" "$LOG_FILE"; then
+                    print_status "warn" "Detected resource conflict"
+                    print_status "info" "Attempting to import existing resources..."
+                    
+                    # Try to import existing resources
+                    import_existing_resources
+                    
+                else
+                    print_status "warn" "Unknown error, waiting before retry..."
+                    sleep 15
+                fi
+                
+                if grep -q "Saved plan is stale" "$LOG_FILE"; then
+                    print_status "warn" "Saved plan is stale. A new plan will be generated on the next retry."
+                fi
+
+                # Refresh Terraform state
+                print_status "info" "Refreshing Terraform state..."
+                terraform refresh -var-file="$VAR_FILE" >> "$LOG_FILE" 2>&1 || true
+                
+            else
+                print_status "error" "Maximum retry attempts reached"
+                print_status "error" "Deployment failed after $max_retries attempts"
+                return 1
             fi
-            
-            ((attempt++))
         fi
     done
     
-    print_status "error" "Terraform apply failed after $max_attempts attempts"
-    return 1
+    if [[ "$success" == true ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Fungsi: Cleanup Existing Domains
@@ -897,6 +1284,49 @@ validate_environment() {
     fi
 }
 
+# Fungsi: Ensure Dummy Kubeconfig Exists
+ensure_dummy_kubeconfig() {
+    local kube_config_path="${PROJECT_ROOT}/kubeconfig"
+    local create_dummy=false
+    
+    if [[ ! -f "$kube_config_path" ]]; then
+        create_dummy=true
+        print_status "info" "Kubeconfig not found. Preparing to create dummy..."
+    elif ! grep -q "server:" "$kube_config_path"; then
+        create_dummy=true
+        print_status "warn" "Existing kubeconfig is invalid (no server defined). Overwriting with dummy..."
+    fi
+    
+    if [[ "$create_dummy" == "true" ]]; then
+        print_status "info" "Creating dummy kubeconfig for Terraform provider initialization..."
+        
+        cat <<EOF > "$kube_config_path"
+apiVersion: v1
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+    insecure-skip-tls-verify: true
+  name: default
+contexts:
+- context:
+    cluster: default
+    user: default
+  name: default
+current-context: default
+kind: Config
+preferences: {}
+users:
+- name: default
+  user:
+    token: default
+EOF
+        
+        print_status "success" "Dummy kubeconfig created at: $kube_config_path"
+    else
+        print_status "info" "Valid kubeconfig found, skipping dummy creation."
+    fi
+}
+
 # Fungsi: Enhanced Main Execution Flow
 main() {
     clear
@@ -912,6 +1342,9 @@ main() {
     
     # Check for updates (non-blocking)
     check_for_updates
+
+    # Ensure dummy kubeconfig exists for Terraform providers
+    ensure_dummy_kubeconfig
     
     cd "$PROJECT_ROOT" || {
         print_status "error" "Failed to change to project root: $PROJECT_ROOT"
@@ -959,6 +1392,10 @@ main() {
     
     step_end=$(date +%s)
     echo "Step 2 (Validate) took $((step_end - step_start))s" >> "$LOG_FILE"
+
+    # Reconcile libvirt state drift before planning/applying
+    reconcile_libvirt_state
+    reconcile_libvirt_domain_state
     
     # Step 3: Terraform Plan
     step_start=$(date +%s)
@@ -1257,6 +1694,111 @@ parse_arguments() {
     # Export flags for use in main
     export SKIP_BACKUP=$skip_backup
     export FORCE_MODE=$force_mode
+}
+
+# Fungsi: Fix VM Network Issues (New)
+fix_vm_network_issues() {
+    local vm_name="${1:-k3s-master-01}"
+    
+    print_status "info" "Attempting to fix network issues for VM: $vm_name"
+    
+    # Check if fix script exists
+    local fix_script="${PROJECT_ROOT}/scripts/fix_vm_network.sh"
+    
+    if [[ -f "$fix_script" ]]; then
+        print_status "info" "Running network fix script..."
+        bash "$fix_script" "$vm_name" 2>&1 | tee -a "$LOG_FILE"
+        return $?
+    else
+        print_status "warn" "Network fix script not found, using built-in fixes..."
+        
+        # Built-in fix: Restart libvirt network
+        local network_name=$(sudo virsh domiflist "$vm_name" 2>/dev/null | awk 'NR>2 {print $3; exit}')
+        [[ -z "$network_name" ]] && network_name="default"
+        
+        print_status "info" "Restarting network: $network_name"
+        sudo virsh net-destroy "$network_name" 2>/dev/null || true
+        sleep 2
+        sudo virsh net-start "$network_name" 2>/dev/null || true
+        sleep 5
+        
+        # Restart VM
+        print_status "info" "Rebooting VM: $vm_name"
+        sudo virsh reboot "$vm_name" >> "$LOG_FILE" 2>&1 || true
+        sleep 30
+        
+        return 0
+    fi
+}
+
+
+# Fungsi: Enhanced IP Retrieval with Multiple Methods
+get_vm_ip_address() {
+    local vm_name="${1:-k3s-master-01}"
+    local max_attempts=15
+    local attempt=1
+    
+    print_status "info" "Retrieving IP address for VM: $vm_name"
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        print_status "info" "Attempt $attempt/$max_attempts..."
+        
+        # Method 1: DHCP leases
+        local network_name=$(sudo virsh domiflist "$vm_name" 2>/dev/null | awk 'NR>2 {print $3; exit}')
+        [[ -z "$network_name" ]] && network_name="default"
+        
+        local ip_address=$(sudo virsh net-dhcp-leases "$network_name" 2>/dev/null | grep "$vm_name" | awk '{print $5}' | cut -d'/' -f1 | head -1)
+        
+        if [[ -n "$ip_address" && "$ip_address" != "N/A" ]]; then
+            print_status "success" "IP found via DHCP: $ip_address"
+            echo "$ip_address"
+            return 0
+        fi
+        
+        # Method 2: virsh domifaddr with different sources
+        for source in lease agent arp; do
+            ip_address=$(sudo virsh domifaddr "$vm_name" --source "$source" 2>/dev/null | awk 'NR>2 {print $4}' | cut -d'/' -f1 | head -1)
+            if [[ -n "$ip_address" && "$ip_address" != "N/A" ]]; then
+                print_status "success" "IP found via $source: $ip_address"
+                echo "$ip_address"
+                return 0
+            fi
+        done
+        
+        # Method 3: ARP table
+        local mac_address=$(sudo virsh dumpxml "$vm_name" 2>/dev/null | grep "mac address" | head -1 | sed "s/.*'\(.*\)'.*/\1/")
+        if [[ -n "$mac_address" ]]; then
+            ip_address=$(arp -n 2>/dev/null | grep -i "$mac_address" | awk '{print $1}' | head -1)
+            if [[ -n "$ip_address" && "$ip_address" != "N/A" ]]; then
+                print_status "success" "IP found via ARP: $ip_address"
+                echo "$ip_address"
+                return 0
+            fi
+        fi
+        
+        # Method 4: Check guest agent
+        if sudo virsh qemu-agent-command "$vm_name" '{"execute":"guest-ping"}' &>/dev/null; then
+            local guest_info=$(sudo virsh qemu-agent-command "$vm_name" '{"execute":"guest-network-get-interfaces"}' 2>/dev/null)
+            ip_address=$(echo "$guest_info" | grep -oP '"ip-address":\s*"\K[0-9.]+' | grep -v "127.0.0.1" | head -1)
+            if [[ -n "$ip_address" ]]; then
+                print_status "success" "IP found via guest agent: $ip_address"
+                echo "$ip_address"
+                return 0
+            fi
+        fi
+        
+        # If this is attempt 5, try fixing network
+        if [[ $attempt -eq 5 ]]; then
+            print_status "warn" "IP not found after 5 attempts, trying network fix..."
+            fix_vm_network_issues "$vm_name"
+        fi
+        
+        ((attempt++))
+        sleep 10
+    done
+    
+    print_status "error" "Failed to retrieve IP address after $max_attempts attempts"
+    return 1
 }
 
 # Fungsi: Signal Handler untuk Ctrl+C

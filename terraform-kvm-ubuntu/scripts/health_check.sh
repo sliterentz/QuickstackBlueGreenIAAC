@@ -10,6 +10,8 @@ NODE_IP="$5"
 SSH_USER="$6"
 NETWORK_NAME="${7:-default}"
 POOL_NAME="${8:-k3s_infra_pool}"
+SSH_KEY_PATH="${9:-}"
+SSH_PORT="${10:-22}"
 
 # Redirect detailed output to log file
 LOG_FILE="${LOG_FILE:-.health_check.log}"
@@ -20,6 +22,72 @@ echo "Timestamp: $(date)"
 echo "VM Name: $VM_NAME"
 echo "Hostname: $VM_HOSTNAME"
 echo "Sanitized Name: $SANITIZED_HOSTNAME"
+
+NETWORK_MAX_WAIT="${NETWORK_MAX_WAIT:-120}"
+SSH_PORT_MAX_WAIT="${SSH_PORT_MAX_WAIT:-240}"
+SSH_AUTH_MAX_WAIT="${SSH_AUTH_MAX_WAIT:-300}"
+SSH_CONNECT_TIMEOUT="${SSH_CONNECT_TIMEOUT:-10}"
+SSH_ATTEMPT_TIMEOUT="${SSH_ATTEMPT_TIMEOUT:-20}"
+SSH_CHECK_INTERVAL="${SSH_CHECK_INTERVAL:-5}"
+SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-no}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-/dev/null}"
+
+classify_ssh_error() {
+  local msg="${1:-}"
+  msg=$(echo "$msg" | tr -d '\r')
+  if echo "$msg" | grep -qiE "REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed"; then
+    echo "host_key_verification_failed"
+  elif echo "$msg" | grep -qiE "Permission denied"; then
+    echo "permission_denied"
+  elif echo "$msg" | grep -qiE "No route to host|Network is unreachable|Destination Host Unreachable"; then
+    echo "network_unreachable"
+  elif echo "$msg" | grep -qiE "Connection refused"; then
+    echo "connection_refused"
+  elif echo "$msg" | grep -qiE "Connection timed out|Operation timed out|timed out"; then
+    echo "connection_timeout"
+  elif echo "$msg" | grep -qiE "Could not resolve hostname|Temporary failure in name resolution|Name or service not known"; then
+    echo "dns_failure"
+  elif echo "$msg" | grep -qiE "No such file or directory"; then
+    echo "file_missing"
+  elif echo "$msg" | grep -qiE "bad permissions"; then
+    echo "key_bad_permissions"
+  else
+    echo "unknown"
+  fi
+}
+
+tcp_probe() {
+  local host="${1:-}"
+  local port="${2:-22}"
+  local timeout_s="${3:-5}"
+  timeout "$timeout_s" bash -c "cat < /dev/null > /dev/tcp/$host/$port" 2>&1
+}
+
+build_ssh_opts() {
+  local opts=""
+  opts="$opts -o StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING"
+  opts="$opts -o UserKnownHostsFile=$SSH_KNOWN_HOSTS_FILE"
+  opts="$opts -o ConnectTimeout=$SSH_CONNECT_TIMEOUT"
+  opts="$opts -o ServerAliveInterval=5"
+  opts="$opts -o ServerAliveCountMax=3"
+  opts="$opts -o BatchMode=yes"
+  opts="$opts -o IdentitiesOnly=yes"
+  opts="$opts -o PreferredAuthentications=publickey"
+  opts="$opts -o LogLevel=ERROR"
+  if [ -n "$SSH_KEY_PATH" ]; then
+    if [ -f "$SSH_KEY_PATH" ]; then
+      local key_perms=""
+      key_perms=$(stat -c "%a" "$SSH_KEY_PATH" 2>/dev/null || stat -f "%Lp" "$SSH_KEY_PATH" 2>/dev/null)
+      if [ -n "$key_perms" ] && [ "$key_perms" != "600" ] && [ "$key_perms" != "400" ]; then
+        chmod 600 "$SSH_KEY_PATH" 2>/dev/null || true
+      fi
+      opts="$opts -i $SSH_KEY_PATH"
+    else
+      echo "⚠ SSH key path provided but file not found: $SSH_KEY_PATH" >&2
+    fi
+  fi
+  echo "$opts"
+}
 
 # FIXED: Extract IP properly if not already done
 if [ -z "$NODE_IP" ] && [ -n "$RAW_IP_ADDRESS" ]; then
@@ -233,8 +301,9 @@ if [ -n "$TARGET_IP" ]; then
   
   # Wait for network to be ready
   NETWORK_WAIT=0
-  NETWORK_MAX_WAIT=120
   NETWORK_READY=false
+  LAST_NETWORK_CLASS=""
+  LAST_NETWORK_DETAIL=""
   
   while [ $NETWORK_WAIT -lt $NETWORK_MAX_WAIT ]; do
     if ping -c 1 -W 2 "$TARGET_IP" >/dev/null 2>&1; then
@@ -243,8 +312,27 @@ if [ -n "$TARGET_IP" ]; then
       break
     fi
     
+    TCP_DETAIL=$(tcp_probe "$TARGET_IP" "$SSH_PORT" 3)
+    TCP_RC=$?
+    if [ $TCP_RC -eq 0 ]; then
+      echo "✓ Network is reachable (TCP $SSH_PORT open) (waited $NETWORK_WAIT seconds)"
+      NETWORK_READY=true
+      break
+    fi
+    TCP_CLASS=$(classify_ssh_error "$TCP_DETAIL")
+    if [ "$TCP_CLASS" = "connection_refused" ]; then
+      echo "✓ Network is reachable (TCP reachable, port refused) (waited $NETWORK_WAIT seconds)"
+      NETWORK_READY=true
+      break
+    fi
+    LAST_NETWORK_CLASS="$TCP_CLASS"
+    LAST_NETWORK_DETAIL="$TCP_DETAIL"
+
     if [ $((NETWORK_WAIT % 10)) -eq 0 ]; then
       echo "  Waiting for network... ($NETWORK_WAIT/$NETWORK_MAX_WAIT seconds)"
+      if [ -n "$LAST_NETWORK_CLASS" ] && [ "$LAST_NETWORK_CLASS" != "unknown" ]; then
+        echo "  Last TCP probe: $LAST_NETWORK_CLASS"
+      fi
     fi
     
     sleep 2
@@ -253,6 +341,49 @@ if [ -n "$TARGET_IP" ]; then
   
   if [ "$NETWORK_READY" = false ]; then
     echo "✗ Network not reachable after $NETWORK_MAX_WAIT seconds"
+    if [ -n "$LAST_NETWORK_DETAIL" ]; then
+      echo "  Last TCP probe detail: $(echo "$LAST_NETWORK_DETAIL" | head -1)"
+    fi
+    ip route get "$TARGET_IP" 2>/dev/null | sed 's/^/  Route: /' || true
+    
+    DETECTED_IP=$(get_vm_ip "$VM_NAME")
+    if [ -n "$DETECTED_IP" ] && [ "$DETECTED_IP" != "$TARGET_IP" ]; then
+      echo "⚠ Detected IP differs from configured IP"
+      echo "  Configured: $TARGET_IP"
+      echo "  Detected:   $DETECTED_IP"
+      TARGET_IP="$DETECTED_IP"
+      echo ""
+      echo "Retrying connectivity check to detected IP..."
+      
+      NETWORK_WAIT=0
+      NETWORK_READY=false
+      LAST_NETWORK_CLASS=""
+      LAST_NETWORK_DETAIL=""
+      while [ $NETWORK_WAIT -lt $NETWORK_MAX_WAIT ]; do
+        if ping -c 1 -W 2 "$TARGET_IP" >/dev/null 2>&1; then
+          echo "✓ Network is reachable (waited $NETWORK_WAIT seconds)"
+          NETWORK_READY=true
+          break
+        fi
+        TCP_DETAIL=$(tcp_probe "$TARGET_IP" "$SSH_PORT" 3)
+        TCP_RC=$?
+        if [ $TCP_RC -eq 0 ]; then
+          echo "✓ Network is reachable (TCP $SSH_PORT open) (waited $NETWORK_WAIT seconds)"
+          NETWORK_READY=true
+          break
+        fi
+        TCP_CLASS=$(classify_ssh_error "$TCP_DETAIL")
+        if [ "$TCP_CLASS" = "connection_refused" ]; then
+          echo "✓ Network is reachable (TCP reachable, port refused) (waited $NETWORK_WAIT seconds)"
+          NETWORK_READY=true
+          break
+        fi
+        LAST_NETWORK_CLASS="$TCP_CLASS"
+        LAST_NETWORK_DETAIL="$TCP_DETAIL"
+        sleep 2
+        NETWORK_WAIT=$((NETWORK_WAIT + 2))
+      done
+    fi
   fi
 fi
 
@@ -266,17 +397,17 @@ if [ -n "$TARGET_IP" ] && [ "$NETWORK_READY" = true ]; then
   echo "Checking cloud-init status..."
   echo "(This requires SSH access, may take a moment)"
   echo ""
-  
-  # Wait a bit for SSH to be ready
-  sleep 10
-  
-  # Try to check cloud-init status via SSH
-  SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
-  
-  if ssh $SSH_OPTS "$SSH_USER@$TARGET_IP" "cloud-init status" 2>/dev/null; then
+  SSH_OPTS="$(build_ssh_opts)"
+  CLOUDINIT_OUT=$(timeout "$SSH_ATTEMPT_TIMEOUT" ssh $SSH_OPTS "$SSH_USER@$TARGET_IP" "cloud-init status 2>/dev/null" 2>&1)
+  if echo "$CLOUDINIT_OUT" | grep -q "status:"; then
+    echo "$CLOUDINIT_OUT"
     echo "✓ Cloud-init status retrieved"
   else
-    echo "⚠ Cannot retrieve cloud-init status yet"
+    CLOUDINIT_CLASS=$(classify_ssh_error "$CLOUDINIT_OUT")
+    echo "⚠ Cannot retrieve cloud-init status yet ($CLOUDINIT_CLASS)"
+    if [ -n "$CLOUDINIT_OUT" ]; then
+      echo "  Detail: $(echo "$CLOUDINIT_OUT" | head -1)"
+    fi
     echo "  This is normal during initial boot"
   fi
 else
@@ -291,38 +422,98 @@ echo "=== Phase 6: SSH Connectivity ==="
 
 if [ -n "$TARGET_IP" ] && [ "$NETWORK_READY" = true ]; then
   echo "Testing SSH connectivity to $SSH_USER@$TARGET_IP..."
-  
-  SSH_WAIT=0
-  SSH_MAX_WAIT=180  # 3 minutes for SSH to be ready
+  SSH_OPTS="$(build_ssh_opts)"
   SSH_READY=false
-  
-  while [ $SSH_WAIT -lt $SSH_MAX_WAIT ]; do
-    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
-       "$SSH_USER@$TARGET_IP" "echo 'SSH OK'" >/dev/null 2>&1; then
-      echo "✓ SSH is accessible (waited $SSH_WAIT seconds)"
-      SSH_READY=true
+  SSH_PORT_READY=false
+  LAST_TCP_CLASS=""
+  LAST_TCP_DETAIL=""
+  PORT_WAIT=0
+
+  while [ $PORT_WAIT -lt $SSH_PORT_MAX_WAIT ]; do
+    TCP_DETAIL=$(tcp_probe "$TARGET_IP" "$SSH_PORT" 5)
+    TCP_RC=$?
+    if [ $TCP_RC -eq 0 ]; then
+      echo "✓ Port $SSH_PORT is open (waited $PORT_WAIT seconds)"
+      SSH_PORT_READY=true
       break
     fi
-    
-    if [ $((SSH_WAIT % 15)) -eq 0 ]; then
-      echo "  Waiting for SSH... ($SSH_WAIT/$SSH_MAX_WAIT seconds)"
-      
-      # Check if port 22 is open
-      if [ $((SSH_WAIT % 30)) -eq 0 ]; then
-        if nc -zv -w 2 "$TARGET_IP" 22 2>&1 | grep -q "succeeded\|open"; then
-          echo "  Port 22 is open, SSH service may be starting..."
-        else
-          echo "  Port 22 not yet open..."
-        fi
+    LAST_TCP_CLASS=$(classify_ssh_error "$TCP_DETAIL")
+    LAST_TCP_DETAIL="$TCP_DETAIL"
+    if [ $((PORT_WAIT % 20)) -eq 0 ]; then
+      echo "  Waiting for SSH port... ($PORT_WAIT/$SSH_PORT_MAX_WAIT seconds)"
+      if [ -n "$LAST_TCP_CLASS" ] && [ "$LAST_TCP_CLASS" != "unknown" ]; then
+        echo "  Last TCP probe: $LAST_TCP_CLASS"
       fi
     fi
-    
-    sleep 3
-    SSH_WAIT=$((SSH_WAIT + 3))
+    sleep "$SSH_CHECK_INTERVAL"
+    PORT_WAIT=$((PORT_WAIT + SSH_CHECK_INTERVAL))
   done
-  
+
+  if [ "$SSH_PORT_READY" = true ]; then
+    AUTH_WAIT=0
+    LAST_SSH_CLASS=""
+    LAST_SSH_DETAIL=""
+    PERM_DENIED_COUNT=0
+
+    while [ $AUTH_WAIT -lt $SSH_AUTH_MAX_WAIT ]; do
+      SSH_DETAIL=$(timeout "$SSH_ATTEMPT_TIMEOUT" ssh $SSH_OPTS "$SSH_USER@$TARGET_IP" "echo 'SSH OK'" 2>&1)
+      SSH_RC=$?
+      if [ $SSH_RC -eq 0 ]; then
+        echo "✓ SSH is accessible (waited $AUTH_WAIT seconds)"
+        SSH_READY=true
+        break
+      fi
+
+      LAST_SSH_CLASS=$(classify_ssh_error "$SSH_DETAIL")
+      LAST_SSH_DETAIL="$SSH_DETAIL"
+      if [ "$LAST_SSH_CLASS" = "permission_denied" ]; then
+        PERM_DENIED_COUNT=$((PERM_DENIED_COUNT + 1))
+      fi
+
+      if [ $((AUTH_WAIT % 30)) -eq 0 ]; then
+        echo "  Waiting for SSH auth... ($AUTH_WAIT/$SSH_AUTH_MAX_WAIT seconds)"
+        if [ -n "$LAST_SSH_CLASS" ] && [ "$LAST_SSH_CLASS" != "unknown" ]; then
+          echo "  Last SSH error: $LAST_SSH_CLASS"
+          echo "  Detail: $(echo "$LAST_SSH_DETAIL" | head -1)"
+        fi
+      fi
+
+      if [ "$PERM_DENIED_COUNT" -ge 3 ]; then
+        break
+      fi
+
+      sleep "$SSH_CHECK_INTERVAL"
+      AUTH_WAIT=$((AUTH_WAIT + SSH_CHECK_INTERVAL))
+    done
+  fi
+
+  if [ "$SSH_PORT_READY" = false ]; then
+    echo "✗ Port $SSH_PORT not accessible after $SSH_PORT_MAX_WAIT seconds"
+    if [ -n "$LAST_TCP_DETAIL" ]; then
+      echo "  Last TCP probe detail: $(echo "$LAST_TCP_DETAIL" | head -1)"
+    fi
+  elif [ "$SSH_READY" = false ]; then
+    echo "✗ SSH not accessible after $SSH_AUTH_MAX_WAIT seconds"
+    if [ -n "$LAST_SSH_CLASS" ]; then
+      echo "  Last SSH error: $LAST_SSH_CLASS"
+    fi
+    if [ -n "$LAST_SSH_DETAIL" ]; then
+      echo "  Last SSH detail: $(echo "$LAST_SSH_DETAIL" | head -1)"
+    fi
+  fi
+
   if [ "$SSH_READY" = false ]; then
-    echo "✗ SSH not accessible after $SSH_MAX_WAIT seconds"
+    echo ""
+    echo "Diagnostics:"
+    $VIRSH_CMD domifaddr "$VM_NAME" 2>/dev/null || true
+    $VIRSH_CMD domiflist "$VM_NAME" 2>/dev/null || true
+    if command -v ip >/dev/null 2>&1; then
+      ip neigh show "$TARGET_IP" 2>/dev/null | sed 's/^/  Neigh: /' || true
+    fi
+    if [ "$SSH_STRICT_HOST_KEY_CHECKING" != "no" ] && [ "$SSH_KNOWN_HOSTS_FILE" != "/dev/null" ]; then
+      echo "  Note: host key mismatch can be resolved by cleaning known_hosts entry."
+      echo "  Example: ssh-keygen -f \"$SSH_KNOWN_HOSTS_FILE\" -R \"$TARGET_IP\""
+    fi
   fi
 else
   echo "⚠ Skipping SSH test (network not ready)"
@@ -345,10 +536,22 @@ if [ -n "$TARGET_IP" ]; then
     echo "Network: ✗ Not reachable"
   fi
   
+  if [ "${SSH_PORT_READY:-false}" = true ]; then
+    echo "SSH Port ($SSH_PORT): ✓ Open"
+  else
+    echo "SSH Port ($SSH_PORT): ✗ Not accessible yet"
+    if [ -n "${LAST_TCP_CLASS:-}" ] && [ "${LAST_TCP_CLASS:-}" != "unknown" ]; then
+      echo "SSH Port Detail: $LAST_TCP_CLASS"
+    fi
+  fi
+  
   if [ "$SSH_READY" = true ]; then
     echo "SSH: ✓ Accessible"
   else
     echo "SSH: ✗ Not accessible yet"
+    if [ -n "${LAST_SSH_CLASS:-}" ] && [ "${LAST_SSH_CLASS:-}" != "unknown" ]; then
+      echo "SSH Detail: $LAST_SSH_CLASS"
+    fi
   fi
 else
   echo "IP Address: Not configured/detected (DHCP pending)"
@@ -363,6 +566,39 @@ if [ -n "$TARGET_IP" ] && [ "$SSH_READY" = true ]; then
   echo "Connect to VM: ssh $SSH_USER@$TARGET_IP"
 else
   echo "⚠ VM is running but SSH/Network issues detected"
+  if [ -n "$TARGET_IP" ] && [ "${NETWORK_READY:-false}" != "true" ]; then
+    echo "Suggested: verify routing/bridge, then re-check IP via: $VIRSH_CMD domifaddr $VM_NAME"
+  elif [ -n "$TARGET_IP" ] && [ "${SSH_PORT_READY:-false}" != "true" ]; then
+    case "${LAST_TCP_CLASS:-unknown}" in
+      network_unreachable)
+        echo "Suggested: check host route/firewall to $TARGET_IP and libvirt network state"
+        ;;
+      connection_timeout)
+        echo "Suggested: port $SSH_PORT may be filtered (guest/host firewall). Check guest firewall via console"
+        ;;
+      connection_refused)
+        echo "Suggested: sshd may not be running yet. Check via console: sudo systemctl status ssh"
+        ;;
+      *)
+        echo "Suggested: check SSH service and firewall on guest; check libvirt network on host"
+        ;;
+    esac
+  elif [ -n "$TARGET_IP" ] && [ "$SSH_READY" != "true" ]; then
+    case "${LAST_SSH_CLASS:-unknown}" in
+      permission_denied)
+        echo "Suggested: verify SSH username/key injection and authorized_keys on guest"
+        ;;
+      host_key_verification_failed)
+        echo "Suggested: fix known_hosts mismatch or set SSH_STRICT_HOST_KEY_CHECKING=no for automation"
+        ;;
+      key_bad_permissions)
+        echo "Suggested: fix key permission to 600/400 and retry"
+        ;;
+      *)
+        echo "Suggested: inspect SSH logs on guest: journalctl -u ssh -n 50"
+        ;;
+    esac
+  fi
   echo "Check logs: $LOG_FILE"
 fi
 

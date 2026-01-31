@@ -54,6 +54,11 @@ metadata:
     component: main
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: n8n
@@ -64,9 +69,12 @@ spec:
         app: n8n
         component: main
     spec:
+      nodeSelector:
+        workload: n8n
       containers:
         - name: n8n
-          image: docker.n8n.io/n8nio/n8n:latest
+          image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5678
           env:
@@ -84,12 +92,21 @@ spec:
               value: "https://${n8n_hostname}/n8n/"
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
+            - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+              value: "true"
+            - name: N8N_RUNNERS_ENABLED
+              value: "true"
             - name: EXECUTIONS_MODE
               value: "queue"
             - name: QUEUE_BULL_REDIS_HOST
               value: "redis.kube-system-green.svc.cluster.local"
             - name: QUEUE_BULL_REDIS_PORT
               value: "6379"
+            - name: QUEUE_BULL_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: REDIS_PASSWORD
             - name: DB_TYPE
               value: "postgresdb"
             - name: DB_POSTGRESDB_HOST
@@ -118,11 +135,18 @@ spec:
                   key: N8N_ENCRYPTION_KEY
           resources:
             requests:
-              memory: "${resource_requests_memory}"
-              cpu: "${resource_requests_cpu}"
+              memory: "${main_requests_memory}"
+              cpu: "${main_requests_cpu}"
             limits:
-              memory: "${resource_limits_memory}"
-              cpu: "${resource_limits_cpu}"
+              memory: "${main_limits_memory}"
+              cpu: "${main_limits_cpu}"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
@@ -149,6 +173,11 @@ metadata:
     component: worker
 spec:
   replicas: ${replicas}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: n8n
@@ -159,19 +188,31 @@ spec:
         app: n8n
         component: worker
     spec:
+      nodeSelector:
+        workload: n8n
       containers:
         - name: n8n
-          image: docker.n8n.io/n8nio/n8n:latest
+          image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
+          imagePullPolicy: IfNotPresent
           command: ["n8n", "worker"]
           env:
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
+            - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+              value: "true"
+            - name: N8N_RUNNERS_ENABLED
+              value: "true"
             - name: EXECUTIONS_MODE
               value: "queue"
             - name: QUEUE_BULL_REDIS_HOST
               value: "redis.kube-system-green.svc.cluster.local"
             - name: QUEUE_BULL_REDIS_PORT
               value: "6379"
+            - name: QUEUE_BULL_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: REDIS_PASSWORD
             - name: DB_TYPE
               value: "postgresdb"
             - name: DB_POSTGRESDB_HOST
@@ -200,18 +241,17 @@ spec:
                   key: N8N_ENCRYPTION_KEY
           resources:
             requests:
-              memory: "${resource_requests_memory}"
-              cpu: "${resource_requests_cpu}"
+              memory: "${worker_requests_memory}"
+              cpu: "${worker_requests_cpu}"
             limits:
-              memory: "${resource_limits_memory}"
-              cpu: "${resource_limits_cpu}"
+              memory: "${worker_limits_memory}"
+              cpu: "${worker_limits_cpu}"
           volumeMounts:
             - name: n8n-data
               mountPath: /home/node/.n8n
       volumes:
         - name: n8n-data
-          persistentVolumeClaim:
-            claimName: n8n-storage
+          emptyDir: {}
 
 ---
 # 5b. Horizontal Pod Autoscaler for Worker
@@ -253,6 +293,11 @@ metadata:
     component: webhook
 spec:
   replicas: ${replicas}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: n8n
@@ -263,9 +308,12 @@ spec:
         app: n8n
         component: webhook
     spec:
+      nodeSelector:
+        workload: n8n
       containers:
         - name: n8n
-          image: docker.n8n.io/n8nio/n8n:latest
+          image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
+          imagePullPolicy: IfNotPresent
           command: ["n8n", "webhook"]
           ports:
             - containerPort: 5678
@@ -274,12 +322,21 @@ spec:
               value: "https://${n8n_hostname}/n8n/"
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
+            - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+              value: "true"
+            - name: N8N_RUNNERS_ENABLED
+              value: "true"
             - name: EXECUTIONS_MODE
               value: "queue"
             - name: QUEUE_BULL_REDIS_HOST
               value: "redis.kube-system-green.svc.cluster.local"
             - name: QUEUE_BULL_REDIS_PORT
               value: "6379"
+            - name: QUEUE_BULL_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: REDIS_PASSWORD
             - name: DB_TYPE
               value: "postgresdb"
             - name: DB_POSTGRESDB_HOST
@@ -308,11 +365,18 @@ spec:
                   key: N8N_ENCRYPTION_KEY
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: "${webhook_requests_memory}"
+              cpu: "${webhook_requests_cpu}"
             limits:
-              memory: "1Gi"
-              cpu: "500m"
+              memory: "${webhook_limits_memory}"
+              cpu: "${webhook_limits_cpu}"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
@@ -324,8 +388,7 @@ spec:
               mountPath: /home/node/.n8n
       volumes:
         - name: n8n-data
-          persistentVolumeClaim:
-            claimName: n8n-storage
+          emptyDir: {}
 
 ---
 # 7. Main Service (Routing)

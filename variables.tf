@@ -196,6 +196,84 @@ variable "n8n_hpa_max_replicas" {
   default     = 2
 }
 
+variable "n8n_image_tag" {
+  description = "Tag image n8n untuk deployment (pin untuk produksi)"
+  type        = string
+  default     = "2.4.4"
+}
+
+variable "n8n_main_requests_cpu" {
+  description = "CPU request untuk n8n-main"
+  type        = string
+  default     = "200m"
+}
+
+variable "n8n_main_requests_memory" {
+  description = "Memory request untuk n8n-main"
+  type        = string
+  default     = "512Mi"
+}
+
+variable "n8n_main_limits_cpu" {
+  description = "CPU limit untuk n8n-main"
+  type        = string
+  default     = "1000m"
+}
+
+variable "n8n_main_limits_memory" {
+  description = "Memory limit untuk n8n-main"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "n8n_worker_requests_cpu" {
+  description = "CPU request untuk n8n-worker"
+  type        = string
+  default     = "100m"
+}
+
+variable "n8n_worker_requests_memory" {
+  description = "Memory request untuk n8n-worker"
+  type        = string
+  default     = "256Mi"
+}
+
+variable "n8n_worker_limits_cpu" {
+  description = "CPU limit untuk n8n-worker"
+  type        = string
+  default     = "500m"
+}
+
+variable "n8n_worker_limits_memory" {
+  description = "Memory limit untuk n8n-worker"
+  type        = string
+  default     = "512Mi"
+}
+
+variable "n8n_webhook_requests_cpu" {
+  description = "CPU request untuk n8n-webhook"
+  type        = string
+  default     = "100m"
+}
+
+variable "n8n_webhook_requests_memory" {
+  description = "Memory request untuk n8n-webhook"
+  type        = string
+  default     = "256Mi"
+}
+
+variable "n8n_webhook_limits_cpu" {
+  description = "CPU limit untuk n8n-webhook"
+  type        = string
+  default     = "500m"
+}
+
+variable "n8n_webhook_limits_memory" {
+  description = "Memory limit untuk n8n-webhook"
+  type        = string
+  default     = "512Mi"
+}
+
 # ============================================
 # ============================================
 # General Configuration Variables
@@ -249,7 +327,7 @@ variable "vm_ip_address" {
   default     = ""
 
   validation {
-    condition = var.vm_ip_address == "" || can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?$", var.vm_ip_address))
+    condition     = var.vm_ip_address == "" || can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?$", var.vm_ip_address))
     error_message = "The vm_ip_address must be a valid IP address with optional CIDR notation (e.g., '192.168.122.10' or '192.168.122.10/24'), or empty for DHCP."
   }
 }
@@ -312,6 +390,18 @@ variable "libvirt_domain_type" {
     condition     = contains(["kvm", "qemu"], var.libvirt_domain_type)
     error_message = "Domain type must be 'kvm' or 'qemu'."
   }
+}
+
+variable "volume_create_timeout" {
+  description = "Timeout for volume creation (including image download)"
+  type        = string
+  default     = ""
+}
+
+variable "volume_delete_timeout" {
+  description = "Timeout for volume deletion"
+  type        = string
+  default     = ""
 }
 
 variable "ubuntu_img_url" {

@@ -76,25 +76,28 @@ module "kvm_ubuntu" {
     libvirt = libvirt
   }
 
-  vm_hostname    = var.vm_hostname
-  vm_memory      = var.vm_memory
-  vm_vcpu        = var.vm_vcpu
-  vm_disk_size   = var.vm_disk_size
-  vm_ip_address  = var.vm_ip_address
-  vm_gateway     = var.vm_gateway
-  vm_nameservers = var.vm_nameservers
-  libvirt_pool_name = var.libvirt_pool_name
-  libvirt_domain_type = var.libvirt_domain_type
-  ubuntu_img_url = var.ubuntu_img_url
-  network_name   = var.network_name
-  ssh_public_key = "${var.ssh_private_key_path}.pub"
-  ssh_username   = var.ssh_username
-  k3s_version      = var.k3s_version
-  k3s_node_role    = var.k3s_node_role
-  k3s_server_url   = var.k3s_server_url
+  vm_hostname           = var.vm_hostname
+  vm_memory             = var.vm_memory
+  vm_vcpu               = var.vm_vcpu
+  vm_disk_size          = var.vm_disk_size
+  vm_ip_address         = var.vm_ip_address
+  vm_gateway            = var.vm_gateway
+  vm_nameservers        = var.vm_nameservers
+  libvirt_pool_name     = var.libvirt_pool_name
+  libvirt_domain_type   = var.libvirt_domain_type
+  volume_create_timeout = "var.volume_create_timeout"
+  volume_delete_timeout = "var.volume_delete_timeout"
+  ubuntu_img_url        = var.ubuntu_img_url
+  network_name          = var.network_name
+  ssh_public_key        = "${var.ssh_private_key_path}.pub"
+  ssh_username          = var.ssh_username
+  k3s_version           = var.k3s_version
+  k3s_node_role         = var.k3s_node_role
+  k3s_server_url        = var.k3s_server_url
   # Use generated token if not provided in vars
-  k3s_token        = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
-  cpu_mode       = var.cpu_mode
+  k3s_token           = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
+  cpu_mode            = var.cpu_mode
+  extra_hosts_entries = local.cluster_hosts_entries
 }
 
 # ============================================================================
@@ -107,17 +110,17 @@ module "n8n_worker" {
     libvirt = libvirt
   }
 
-  vm_hostname    = "${var.worker_n8n_hostname}-${count.index + 1}"
-  vm_memory      = var.worker_n8n_memory
-  vm_vcpu        = var.worker_n8n_vcpu
-  vm_disk_size   = var.vm_disk_size
-  
+  vm_hostname  = "${var.worker_n8n_hostname}-${count.index + 1}"
+  vm_memory    = var.worker_n8n_memory
+  vm_vcpu      = var.worker_n8n_vcpu
+  vm_disk_size = var.vm_disk_size
+
   # Static IP Allocation: Increment from start IP
   # Example: 192.168.122.251/24 -> .251, .252, etc.
   vm_ip_address  = "${cidrhost(var.worker_n8n_ip_start, tonumber(split(".", split("/", var.worker_n8n_ip_start)[0])[3]) + count.index)}/24"
   vm_gateway     = var.vm_gateway
   vm_nameservers = var.vm_nameservers
-  
+
   libvirt_pool_name   = var.libvirt_pool_name
   libvirt_domain_type = var.libvirt_domain_type
   ubuntu_img_url      = var.ubuntu_img_url
@@ -127,13 +130,14 @@ module "n8n_worker" {
   cpu_mode            = var.cpu_mode
 
   # K3s Agent Configuration
-  k3s_version      = var.k3s_version
-  k3s_node_role    = "agent"
+  k3s_version   = var.k3s_version
+  k3s_node_role = "agent"
   # Connect to Master Node IP
-  k3s_server_url   = "https://${split("/", var.vm_ip_address)[0]}:6443"
-  k3s_token        = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
+  k3s_server_url = "https://${split("/", var.vm_ip_address)[0]}:6443"
+  k3s_token      = var.k3s_token != "" ? var.k3s_token : random_password.k3s_token.result
 
-  depends_on = [module.kvm_ubuntu]
+  extra_hosts_entries = local.cluster_hosts_entries
+  depends_on          = [module.kvm_ubuntu]
 }
 
 # Gunakan external data source untuk memastikan kubeconfig ada sebelum provider inisialisasi
@@ -142,12 +146,22 @@ data "external" "kubeconfig_init" {
     if [ ! -f kubeconfig ]; then
       cat <<EOF > kubeconfig
 apiVersion: v1
-clusters: []
-contexts: []
-current-context: ""
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: default
+contexts:
+- context:
+    cluster: default
+    user: default
+  name: default
+current-context: default
 kind: Config
 preferences: {}
-users: []
+users:
+- name: default
+  user:
+    token: default
 EOF
     fi
     echo '{"status": "ready"}'
@@ -162,6 +176,18 @@ data "external" "kubeconfig" {
 }
 
 locals {
+  cluster_hosts_entries = concat(
+    [format("%s %s", split("/", var.vm_ip_address)[0], var.vm_hostname)],
+    [
+      for idx in range(var.worker_n8n_count) : format(
+        "%s %s-%d",
+        cidrhost(var.worker_n8n_ip_start, tonumber(split(".", split("/", var.worker_n8n_ip_start)[0])[3]) + idx),
+        var.worker_n8n_hostname,
+        idx + 1
+      )
+    ]
+  )
+
   # Cek apakah kubeconfig sudah berisi IP VM (bukan placeholder dummy)
   kubeconfig_content = fileexists("${path.module}/kubeconfig") ? file("${path.module}/kubeconfig") : ""
 
