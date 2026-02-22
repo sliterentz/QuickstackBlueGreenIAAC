@@ -65,6 +65,7 @@ tcp_probe() {
 
 build_ssh_opts() {
   local opts=""
+  opts="$opts -F /dev/null"
   opts="$opts -o StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING"
   opts="$opts -o UserKnownHostsFile=$SSH_KNOWN_HOSTS_FILE"
   opts="$opts -o ConnectTimeout=$SSH_CONNECT_TIMEOUT"
@@ -119,23 +120,9 @@ LIBVIRT_URI="qemu:///system"
 VIRSH_CMD="virsh -c $LIBVIRT_URI"
 
 if ! $VIRSH_CMD version >/dev/null 2>&1; then
-  echo "⚠ Cannot connect to libvirt as current user, trying with sudo..."
-  VIRSH_CMD="sudo virsh -c $LIBVIRT_URI"
-  
-  if ! $VIRSH_CMD version >/dev/null 2>&1; then
-    echo "✗ Still cannot connect to libvirt"
-    echo "Checking libvirt service status..."
-    sudo systemctl status libvirtd --no-pager || true
-    echo ""
-    echo "Attempting to start libvirtd..."
-    sudo systemctl start libvirtd || true
-    sleep 3
-    
-    if ! $VIRSH_CMD version >/dev/null 2>&1; then
-      echo "✗ Final attempt: Still cannot connect to libvirt"
-      exit 1
-    fi
-  fi
+  echo "✗ Cannot connect to libvirt as current user (no sudo fallback)"
+  echo "  Try: virsh -c qemu:///system version"
+  exit 1
 fi
 
 echo "✓ Libvirt connection OK"

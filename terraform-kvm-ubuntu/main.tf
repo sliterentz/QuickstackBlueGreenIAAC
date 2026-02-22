@@ -14,27 +14,28 @@ resource "null_resource" "pool_management" {
     command = <<-EOT
       POOL_NAME="${self.triggers.pool_name}"
       POOL_PATH="${self.triggers.pool_path}"
+      VIRSH_CMD="virsh -c qemu:///system"
       
       echo "Checking storage pool '$POOL_NAME'..."
       
       # Cek apakah pool sudah didefinisikan di libvirt
-      if sudo virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
+      if $VIRSH_CMD pool-info "$POOL_NAME" >/dev/null 2>&1; then
         echo "✓ Pool '$POOL_NAME' already exists."
         
         # Cek apakah pool aktif (running)
-        if ! sudo virsh pool-list --persistent | grep -q "$POOL_NAME"; then
+        if ! $VIRSH_CMD pool-list --persistent | grep -q "$POOL_NAME"; then
              echo "Starting pool '$POOL_NAME'..."
-             sudo virsh pool-start "$POOL_NAME"
+             $VIRSH_CMD pool-start "$POOL_NAME"
         else
              echo "✓ Pool '$POOL_NAME' is active."
         fi
       else
         echo "Pool '$POOL_NAME' does not exist. Creating..."
         # Define, Build, Start, Autostart
-        sudo virsh pool-define-as --name "$POOL_NAME" --type dir --target "$POOL_PATH"
-        sudo virsh pool-build "$POOL_NAME"
-        sudo virsh pool-start "$POOL_NAME"
-        sudo virsh pool-autostart "$POOL_NAME"
+        $VIRSH_CMD pool-define-as --name "$POOL_NAME" --type dir --target "$POOL_PATH"
+        $VIRSH_CMD pool-build "$POOL_NAME"
+        $VIRSH_CMD pool-start "$POOL_NAME"
+        $VIRSH_CMD pool-autostart "$POOL_NAME"
         echo "✓ Pool '$POOL_NAME' created and started."
       fi
     EOT
@@ -232,6 +233,7 @@ resource "null_resource" "verify_cloudinit_cleanup" {
       
       CLOUDINIT_NAME="${local.cloudinit_iso_name}"
       POOL_NAME="${local.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
       VERIFICATION_FAILED=false
 
       # Wait a bit more to ensure cleanup is complete
@@ -240,11 +242,11 @@ resource "null_resource" "verify_cloudinit_cleanup" {
       
       # Refresh pool to get latest state
       echo "Refreshing storage pool..."
-      sudo virsh pool-refresh "$POOL_NAME" 2>/dev/null || true
+      $VIRSH_CMD pool-refresh "$POOL_NAME" 2>/dev/null || true
       sleep 2
 
       # Check if volume still exists
-      if sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
+      if $VIRSH_CMD vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
         echo "✗ ERROR: Cloudinit volume still exists after cleanup!"
         echo "Volume: $CLOUDINIT_NAME"
         echo "Pool: $POOL_NAME"
@@ -252,15 +254,15 @@ resource "null_resource" "verify_cloudinit_cleanup" {
         echo "This should not happen. Attempting emergency cleanup..."
         
         # Emergency cleanup
-        sudo virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" --force 2>/dev/null || true
+        $VIRSH_CMD vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" --force 2>/dev/null || true
         sleep 3
 
         # Refresh again
-        sudo virsh pool-refresh "$POOL_NAME" 2>/dev/null || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" 2>/dev/null || true
         sleep 2
 
         # Check again
-        if sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
+        if $VIRSH_CMD vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
           echo "✗ FATAL: Cannot remove existing volume"
           echo "Please manually run:"
           echo "  virsh vol-delete $CLOUDINIT_NAME --pool $POOL_NAME"
@@ -651,6 +653,7 @@ resource "null_resource" "force_pool_refresh" {
       
       # CRITICAL: Validate pool name before proceeding
       POOL_NAME="${local.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
       
       if [ -z "$POOL_NAME" ]; then
         echo "✗ FATAL ERROR: Pool name is empty!"
@@ -669,30 +672,30 @@ resource "null_resource" "force_pool_refresh" {
       
       # Verify pool exists before attempting refresh
       echo "Verifying pool exists..."
-      if ! sudo virsh pool-list --all | grep -q "$POOL_NAME"; then
+      if ! $VIRSH_CMD pool-list --all | grep -q "$POOL_NAME"; then
         echo "✗ ERROR: Storage pool '$POOL_NAME' does not exist"
         echo ""
         echo "Available pools:"
-        sudo virsh pool-list --all
+        $VIRSH_CMD pool-list --all
         echo ""
         echo "Please ensure the pool is created before running this script"
-        echo "Run: sudo virsh pool-define-as $POOL_NAME dir - - - - /var/lib/libvirt/images/$POOL_NAME"
-        echo "     sudo virsh pool-build $POOL_NAME"
-        echo "     sudo virsh pool-start $POOL_NAME"
-        echo "     sudo virsh pool-autostart $POOL_NAME"
+        echo "Run: virsh -c qemu:///system pool-define-as $POOL_NAME dir - - - - /var/lib/libvirt/images/$POOL_NAME"
+        echo "     virsh -c qemu:///system pool-build $POOL_NAME"
+        echo "     virsh -c qemu:///system pool-start $POOL_NAME"
+        echo "     virsh -c qemu:///system pool-autostart $POOL_NAME"
         exit 1
       fi
       
       echo "✓ Pool '$POOL_NAME' exists"
       
       # Check if pool is active
-      if ! sudo virsh pool-list | grep -q "$POOL_NAME"; then
+      if ! $VIRSH_CMD pool-list | grep -q "$POOL_NAME"; then
         echo "⚠ Pool is not active, attempting to start..."
-        if sudo virsh pool-start "$POOL_NAME" 2>/dev/null; then
+        if $VIRSH_CMD pool-start "$POOL_NAME" 2>/dev/null; then
           echo "✓ Pool started successfully"
         else
           echo "✗ ERROR: Failed to start pool"
-          sudo virsh pool-info "$POOL_NAME"
+          $VIRSH_CMD pool-info "$POOL_NAME"
           exit 1
         fi
       fi
@@ -702,7 +705,7 @@ resource "null_resource" "force_pool_refresh" {
       echo "Step 1: Refreshing storage pool..."
       for i in {1..3}; do
         echo "  Refresh attempt $i/3..."
-        if sudo virsh pool-refresh "$POOL_NAME" 2>&1; then
+        if $VIRSH_CMD pool-refresh "$POOL_NAME" 2>&1; then
           echo "  ✓ Refresh successful"
         else
           echo "  ⚠ Refresh failed, retrying..."
@@ -721,7 +724,7 @@ resource "null_resource" "force_pool_refresh" {
       
       # Step 3: Verify all volumes are present
       echo "Step 3: Listing all volumes in pool..."
-      if sudo virsh vol-list "$POOL_NAME" 2>&1; then
+      if $VIRSH_CMD vol-list "$POOL_NAME" 2>&1; then
         echo "✓ Volume list retrieved"
       else
         echo "⚠ Failed to list volumes"
@@ -739,22 +742,22 @@ resource "null_resource" "force_pool_refresh" {
         echo "  Verification attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
         
         # Refresh pool before each check
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
         sleep 2
         
         # Check if ISO exists in pool
-        if sudo virsh vol-list "$POOL_NAME" | grep -q "$CLOUDINIT_NAME"; then
+        if $VIRSH_CMD vol-list "$POOL_NAME" | grep -q "$CLOUDINIT_NAME"; then
           echo "  ✓ Cloud-init ISO found: $CLOUDINIT_NAME"
           ISO_FOUND=true
           break
         fi
         
         # Check if ISO exists in filesystem
-        POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
-        if sudo test -f "$POOL_PATH/$CLOUDINIT_NAME"; then
+        POOL_PATH=$($VIRSH_CMD pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
+        if test -f "$POOL_PATH/$CLOUDINIT_NAME"; then
           echo "  ⚠ ISO exists in filesystem but not visible in pool"
           echo "  Attempting to refresh pool again..."
-          sudo virsh pool-refresh "$POOL_NAME" || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" || true
           sleep 3
         else
           echo "  ⚠ ISO not found in filesystem: $POOL_PATH/$CLOUDINIT_NAME"
@@ -779,22 +782,22 @@ resource "null_resource" "force_pool_refresh" {
         echo "  Verification attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
         
         # Refresh pool before each check
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
         sleep 2
         
         # Check if disk exists in pool
-        if sudo virsh vol-list "$POOL_NAME" | grep -q "$DISK_NAME"; then
+        if $VIRSH_CMD vol-list "$POOL_NAME" | grep -q "$DISK_NAME"; then
           echo "  ✓ Disk volume found: $DISK_NAME"
           DISK_FOUND=true
           break
         fi
         
         # Check if disk exists in filesystem
-        POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
-        if sudo test -f "$POOL_PATH/$DISK_NAME"; then
+        POOL_PATH=$($VIRSH_CMD pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
+        if test -f "$POOL_PATH/$DISK_NAME"; then
           echo "  ⚠ Disk exists in filesystem but not visible in pool"
           echo "  Attempting to refresh pool again..."
-          sudo virsh pool-refresh "$POOL_NAME" || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" || true
           sleep 3
         else
           echo "  ⚠ Disk not found in filesystem: $POOL_PATH/$DISK_NAME"
@@ -818,22 +821,22 @@ resource "null_resource" "force_pool_refresh" {
         # Get disk details
         echo ""
         echo "Disk Details:"
-        sudo virsh vol-info "$DISK_NAME" --pool "$POOL_NAME" || true
+        $VIRSH_CMD vol-info "$DISK_NAME" --pool "$POOL_NAME" || true
         
         # Check filesystem
-        POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
-        if sudo test -f "$POOL_PATH/$DISK_NAME"; then
+        POOL_PATH=$($VIRSH_CMD pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
+        if test -f "$POOL_PATH/$DISK_NAME"; then
           echo ""
           echo "Filesystem Details:"
-          sudo ls -lh "$POOL_PATH/$DISK_NAME"
+          ls -lh "$POOL_PATH/$DISK_NAME"
         fi
         
         # Verify disk is readable
         echo ""
         echo "Verifying disk accessibility..."
-        if sudo qemu-img info "$POOL_PATH/$DISK_NAME" >/dev/null 2>&1; then
+        if qemu-img info "$POOL_PATH/$DISK_NAME" >/dev/null 2>&1; then
           echo "✓ Disk is readable and valid qcow2 format"
-          sudo qemu-img info "$POOL_PATH/$DISK_NAME" | grep -E "(file format|virtual size|disk size|backing file)"
+          qemu-img info "$POOL_PATH/$DISK_NAME" | grep -E "(file format|virtual size|disk size|backing file)"
         else
           echo "⚠ WARNING: Disk exists but may be corrupted"
         fi
@@ -846,14 +849,14 @@ resource "null_resource" "force_pool_refresh" {
         echo ""
         echo "Diagnostic Information:"
         echo "1. Pool contents:"
-        sudo virsh vol-list "$POOL_NAME"
+        $VIRSH_CMD vol-list "$POOL_NAME"
         echo ""
         echo "2. Filesystem contents:"
-        POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
-        sudo ls -lh "$POOL_PATH/" | grep -E "(ubuntu-disk|qcow2)" || echo "  No disk volumes found"
+        POOL_PATH=$($VIRSH_CMD pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "/var/lib/libvirt/images/$POOL_NAME")
+        ls -lh "$POOL_PATH/" | grep -E "(ubuntu-disk|qcow2)" || echo "  No disk volumes found"
         echo ""
         echo "3. Pool information:"
-        sudo virsh pool-info "$POOL_NAME"
+        $VIRSH_CMD pool-info "$POOL_NAME"
         echo ""
         echo "4. Check Terraform state:"
         echo "  terraform state show 'module.kvm_ubuntu.libvirt_volume.ubuntu_base'"
@@ -866,8 +869,8 @@ resource "null_resource" "force_pool_refresh" {
         echo ""
         echo "Recommended actions:"
         echo "  1. Check available space: df -h $POOL_PATH"
-        echo "  2. Check pool permissions: sudo ls -ld $POOL_PATH"
-        echo "  3. Verify base image: sudo qemu-img info $POOL_PATH/ubuntu-base-img-${local.sanitized_hostname}.qcow2"
+        echo "  2. Check pool permissions: ls -ld $POOL_PATH"
+        echo "  3. Verify base image: qemu-img info $POOL_PATH/ubuntu-base-img-${local.sanitized_hostname}.qcow2"
         echo "  4. Check Terraform logs for volume creation errors"
         echo "  5. Try: terraform taint module.kvm_ubuntu.libvirt_volume.ubuntu_base"
         echo ""
@@ -967,12 +970,13 @@ resource "null_resource" "ensure_pool_ready" {
       set -e
       
       POOL_NAME="${local.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
       MAX_WAIT=60
       WAIT_COUNT=0
       
       echo "Waiting for storage pool $POOL_NAME to be ready..."
       
-      while ! sudo virsh pool-list | grep -q "$POOL_NAME.*active"; do
+      while ! $VIRSH_CMD pool-list | grep -q "$POOL_NAME.*active"; do
         if [ $WAIT_COUNT -ge $MAX_WAIT ]; then
           echo "ERROR: Storage pool failed to become active"
           exit 1
@@ -986,11 +990,12 @@ resource "null_resource" "ensure_pool_ready" {
       echo "Storage pool is ready"
       
       # Refresh pool
-      sudo virsh pool-refresh "$POOL_NAME" || true
+      $VIRSH_CMD pool-refresh "$POOL_NAME" || true
       
       # Verify pool path is writable
-      POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+')
-      if [ ! -w "$POOL_PATH" ]; then
+      POOL_XML=$($VIRSH_CMD pool-dumpxml "$POOL_NAME" 2>/dev/null || true)
+      POOL_PATH=$(printf '%s\n' "$POOL_XML" | awk -F'[<>]' '/<path>/{print $3; exit}')
+      if [ -n "$POOL_PATH" ] && [ ! -w "$POOL_PATH" ]; then
         echo "WARNING: Pool path may not be writable"
       fi
       
@@ -1007,14 +1012,61 @@ resource "null_resource" "validate_pool_path" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      set -e
+      set -euo pipefail
       
       POOL_NAME="${local.pool_name}"
+      LOG_FILE="${path.root}/logs/.pool_path_validation.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
+      exec > >(tee -a "$LOG_FILE") 2>&1
+
+      if ! command -v virsh >/dev/null 2>&1; then
+        echo "✗ ERROR: virsh not found on PATH"
+        exit 1
+      fi
+
+      USE_SUDO=false
+      run_virsh() {
+        if [ "$USE_SUDO" = true ]; then
+          sudo -n virsh -c qemu:///system "$@"
+        else
+          virsh -c qemu:///system "$@"
+        fi
+      }
+
+      if ! run_virsh uri >/dev/null 2>&1; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+          USE_SUDO=true
+          if ! run_virsh uri >/dev/null 2>&1; then
+            echo "✗ ERROR: Cannot connect to libvirt using virsh (even with sudo -n)"
+            echo "  Try: sudo systemctl status libvirtd"
+            echo "  Check socket: ls -l /var/run/libvirt/libvirt-sock"
+            echo "  Check group: id -nG | tr ' ' '\\n' | grep -E '^libvirt$' || true"
+            exit 1
+          fi
+        else
+          echo "✗ ERROR: Cannot connect to libvirt using virsh and sudo -n is unavailable"
+          echo "  Fix options:"
+          echo "    - Add user to libvirt group and re-login"
+          echo "    - Configure polkit access to libvirt"
+          echo "    - Configure passwordless sudo for virsh"
+          exit 1
+        fi
+      fi
       
       echo "=== Validating Storage Pool Path ==="
+      echo "Timestamp: $(date)"
+      echo "Pool name: $POOL_NAME"
+      VIRSH_URI=$(run_virsh uri 2>/dev/null || true)
+      echo "Virsh URI: $VIRSH_URI"
       
-      # Get pool path from libvirt
-      POOL_PATH=$(sudo virsh pool-dumpxml "$POOL_NAME" | grep -oP '(?<=<path>)[^<]+' || echo "")
+      if ! run_virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
+        echo "✗ ERROR: Storage pool not found or not accessible: $POOL_NAME"
+        run_virsh pool-list --all || true
+        exit 1
+      fi
+
+      POOL_XML=$(run_virsh pool-dumpxml "$POOL_NAME" 2>/dev/null || true)
+      POOL_PATH=$(printf '%s\n' "$POOL_XML" | awk -F'[<>]' '/<path>/{print $3; exit}')
       
       if [ -z "$POOL_PATH" ]; then
         echo "✗ ERROR: Could not determine pool path"
@@ -1029,18 +1081,27 @@ resource "null_resource" "validate_pool_path" {
         exit 1
       fi
       
-      # Verify path is writable
-      if ! sudo test -w "$POOL_PATH"; then
-        echo "✗ ERROR: Pool path is not writable: $POOL_PATH"
-        echo "Current permissions:"
-        sudo ls -ld "$POOL_PATH"
+      if ! run_virsh vol-list "$POOL_NAME" >/dev/null 2>&1; then
+        echo "✗ ERROR: Cannot list volumes in pool via libvirt: $POOL_NAME"
         exit 1
       fi
       
-      # Verify sufficient space (at least 20GB)
-      AVAILABLE_KB=$(df -k "$POOL_PATH" | tail -1 | awk '{print $4}')
-      REQUIRED_KB=$((20 * 1024 * 1024))  # 20GB in KB
-      
+      DF_LINE=$(df -kP "$POOL_PATH" 2>/dev/null | tail -1 || true)
+      if [ -z "$DF_LINE" ]; then
+        DF_LINE=$(df -kP "$(dirname "$POOL_PATH")" 2>/dev/null | tail -1 || true)
+      fi
+
+      REQUIRED_KB=$((20 * 1024 * 1024))
+      AVAILABLE_KB=""
+      if [ -n "$DF_LINE" ]; then
+        AVAILABLE_KB=$(echo "$DF_LINE" | awk '{print $4}')
+      fi
+
+      if [ -z "$AVAILABLE_KB" ] || ! echo "$AVAILABLE_KB" | grep -Eq '^[0-9]+$'; then
+        echo "⚠ WARNING: Could not determine free space via df. Skipping space check."
+        AVAILABLE_KB="$REQUIRED_KB"
+      fi
+
       if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
         AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
         echo "✗ ERROR: Insufficient disk space"
@@ -1052,6 +1113,13 @@ resource "null_resource" "validate_pool_path" {
       echo "✓ Pool path validation complete"
       echo "  Path: $POOL_PATH"
       echo "  Available space: $((AVAILABLE_KB / 1024 / 1024))GB"
+
+      {
+        echo "✓ Pool path validation complete"
+        echo "  Pool: $POOL_NAME"
+        echo "  Path: $POOL_PATH"
+        echo "  Log: $LOG_FILE"
+      } >&2
       
     EOT
 
@@ -1095,6 +1163,7 @@ resource "null_resource" "cleanup_cloudinit" {
       
       CLOUDINIT_NAME="${local.cloudinit_iso_name}"
       POOL_NAME="${local.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
       MAX_RETRIES=10
       RETRY_COUNT=0
       CLEANUP_NEEDED=false
@@ -1118,8 +1187,8 @@ resource "null_resource" "cleanup_cloudinit" {
       # Function to check if volume exists
       volume_exists() {
         # Selalu refresh pool sebelum cek keberadaan volume
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1
-        sudo virsh vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1
+        $VIRSH_CMD vol-info "$CLOUDINIT_NAME" --pool "$POOL_NAME" >/dev/null 2>&1
         return $?
       }
       
@@ -1139,7 +1208,7 @@ resource "null_resource" "cleanup_cloudinit" {
         if [ "$CLEANUP_NEEDED" != true ]; then
           echo "✓ No cleanup required"
           sleep 5
-          sudo virsh pool-refresh "$POOL_NAME" 2>/dev/null || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" 2>/dev/null || true
           {
             echo "✓ Cloudinit Cleanup Check Complete"
             echo "  Managed by Terraform: $CLOUDINIT_NAME"
@@ -1150,21 +1219,21 @@ resource "null_resource" "cleanup_cloudinit" {
         
         # Find and stop any VMs using this volume FIRST
         echo "Checking for VMs using this volume..."
-        for vm in $(sudo virsh list --all --name); do
+        for vm in $($VIRSH_CMD list --all --name); do
           if [ -n "$vm" ]; then
-            if sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
+            if $VIRSH_CMD domblklist "$vm" 2>/dev/null | grep -q "$CLOUDINIT_NAME"; then
               echo "  Found VM using volume: $vm"
               
               # Check if VM is running
-              if sudo virsh list --state-running --name | grep -q "^$vm$"; then
+              if $VIRSH_CMD list --state-running --name | grep -q "^$vm$"; then
                 echo "  Stopping running VM: $vm"
-                sudo virsh destroy "$vm" 2>/dev/null || true
+                $VIRSH_CMD destroy "$vm" 2>/dev/null || true
                 sleep 3
               fi
               
               # Undefine VM to release volume
               echo "  Undefining VM: $vm"
-              sudo virsh undefine "$vm" --remove-all-storage 2>/dev/null || true
+              $VIRSH_CMD undefine "$vm" --remove-all-storage 2>/dev/null || true
               sleep 2
             fi
           fi
@@ -1174,7 +1243,7 @@ resource "null_resource" "cleanup_cloudinit" {
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
           echo "Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES to delete volume..."
           
-          if sudo virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null; then
+          if $VIRSH_CMD vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null; then
             echo "✓ Successfully deleted volume"
             sleep 2
             
@@ -1200,11 +1269,11 @@ resource "null_resource" "cleanup_cloudinit" {
           echo "Attempting nuclear option: refresh pool and retry..."
           
           # Refresh pool
-          sudo virsh pool-refresh "$POOL_NAME" 2>/dev/null || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" 2>/dev/null || true
           sleep 2
           
           # One last try
-          sudo virsh vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null || true
+          $VIRSH_CMD vol-delete "$CLOUDINIT_NAME" --pool "$POOL_NAME" 2>/dev/null || true
           sleep 3
           
           if volume_exists; then
@@ -1236,7 +1305,7 @@ resource "null_resource" "cleanup_cloudinit" {
       sleep 5
       
       # Final pool refresh
-      sudo virsh pool-refresh "$POOL_NAME" 2>/dev/null || true
+      $VIRSH_CMD pool-refresh "$POOL_NAME" 2>/dev/null || true
       
       echo "=== Cleanup Summary ==="
       echo "Cleanup Needed: $CLEANUP_NEEDED"
@@ -1303,7 +1372,7 @@ data "template_file" "user_data" {
     static_ip      = var.vm_ip_address
     gateway        = var.vm_gateway
     nameservers    = local.nameservers_yaml
-    extra_hosts    = join("\n", var.extra_hosts_entries)
+    extra_hosts    = replace(join("\n", var.extra_hosts_entries), "\n", "\\n")
     k3s_version    = var.k3s_version
     k3s_role       = var.k3s_node_role
     k3s_server_url = var.k3s_server_url
@@ -1354,21 +1423,22 @@ resource "null_resource" "cleanup_cloudinit_conflict" {
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
+    command     = <<-EOT
       set +e
       VOL_NAME="${self.triggers.target_vol_name}"
       POOL_NAME="${self.triggers.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
       
       echo "Checking for conflicting cloudinit volume: $VOL_NAME in pool $POOL_NAME"
       
-      if sudo virsh vol-info "$VOL_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
+      if $VIRSH_CMD vol-info "$VOL_NAME" --pool "$POOL_NAME" >/dev/null 2>&1; then
         echo "Found existing conflicting volume: $VOL_NAME"
         echo "Attempting to delete it to allow Terraform to recreate it..."
         
         # Check if it's in use
-        if sudo virsh vol-list "$POOL_NAME" | grep -q "$VOL_NAME"; then
+        if $VIRSH_CMD vol-list "$POOL_NAME" | grep -q "$VOL_NAME"; then
              # Try to delete
-             if sudo virsh vol-delete "$VOL_NAME" --pool "$POOL_NAME"; then
+             if $VIRSH_CMD vol-delete "$VOL_NAME" --pool "$POOL_NAME"; then
                  echo "Successfully deleted conflicting volume: $VOL_NAME"
              else
                  echo "Failed to delete volume. It might be in use by a running VM."
@@ -1397,7 +1467,7 @@ resource "libvirt_cloudinit_disk" "commoninit" {
     null_resource.pool_management,
     null_resource.cleanup_cloudinit,
     null_resource.verify_cloudinit_cleanup,
-    null_resource.pre_deployment_check, # Ensure pre-deployment check completes before ISO creation
+    null_resource.pre_deployment_check,       # Ensure pre-deployment check completes before ISO creation
     null_resource.cleanup_cloudinit_conflict, # NEW: Ensure conflict cleanup runs before creation
     time_sleep.wait_for_cleanup,
     data.template_file.user_data,
@@ -1437,9 +1507,9 @@ resource "null_resource" "verify_cloudinit_iso" {
       
       # Wait up to 30 seconds for ISO to appear
       for i in {1..30}; do
-        if sudo test -f "$ISO_PATH"; then
+        if test -f "$ISO_PATH"; then
           echo "✓ Cloud-init ISO found"
-          sudo ls -lh "$ISO_PATH"
+          ls -lh "$ISO_PATH"
           exit 0
         fi
         echo "Waiting for ISO... ($i/30)"
@@ -1448,7 +1518,7 @@ resource "null_resource" "verify_cloudinit_iso" {
       
       echo "✗ ERROR: Cloud-init ISO not found after 30 seconds"
       echo "Checking pool contents:"
-      sudo virsh vol-list ${local.pool_name}
+      virsh -c qemu:///system vol-list ${local.pool_name}
       exit 1
     EOT
   }
@@ -1528,6 +1598,7 @@ resource "null_resource" "pre_deployment_check" {
       CLOUDINIT_NAME="${local.cloudinit_iso_name}"
       DISK_NAME="ubuntu-disk-${local.sanitized_hostname}.qcow2"
       POOL_NAME="${local.pool_name}"
+      VIRSH_CMD="virsh -c qemu:///system"
 
       is_volume_managed_by_terraform() {
         local target_name="$1"
@@ -1546,10 +1617,10 @@ resource "null_resource" "pre_deployment_check" {
 
       # Refresh pool to ensure we have the latest state
       echo "Refreshing storage pool '$POOL_NAME'..."
-      sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || echo "  Warning: Pool refresh failed"
+      $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || echo "  Warning: Pool refresh failed"
       
       for VOL in "$CLOUDINIT_NAME" "$DISK_NAME"; do
-        if sudo virsh vol-info "$VOL" --pool "$POOL_NAME" >/dev/null 2>&1; then
+        if $VIRSH_CMD vol-info "$VOL" --pool "$POOL_NAME" >/dev/null 2>&1; then
           echo "⚠ Found existing volume: $VOL"
           echo "  Attempting to resolve conflict..."
 
@@ -1560,8 +1631,8 @@ resource "null_resource" "pre_deployment_check" {
           fi
           
           # Check if any VM is using it
-          USING_VM=$(sudo virsh list --all --name | while read vm; do
-            if [ -n "$vm" ] && sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$VOL"; then
+          USING_VM=$($VIRSH_CMD list --all --name | while read vm; do
+            if [ -n "$vm" ] && $VIRSH_CMD domblklist "$vm" 2>/dev/null | grep -q "$VOL"; then
               echo "$vm"
               break
             fi
@@ -1570,13 +1641,13 @@ resource "null_resource" "pre_deployment_check" {
           if [ -n "$USING_VM" ]; then
             echo "  Volume is in use by VM: $USING_VM"
             echo "  Stopping and undefining VM..."
-            sudo virsh destroy "$USING_VM" 2>/dev/null || true
-            sudo virsh undefine "$USING_VM" --remove-all-storage 2>/dev/null || true
+            $VIRSH_CMD destroy "$USING_VM" 2>/dev/null || true
+            $VIRSH_CMD undefine "$USING_VM" --remove-all-storage 2>/dev/null || true
             sleep 2
           fi
           
           # Delete volume
-          if sudo virsh vol-delete "$VOL" --pool "$POOL_NAME" 2>/dev/null; then
+          if $VIRSH_CMD vol-delete "$VOL" --pool "$POOL_NAME" 2>/dev/null; then
             echo "  ✓ Volume $VOL deleted successfully"
           else
             echo "  ⚠ Failed to delete volume $VOL (might be in use or partially deleted)"
@@ -1590,9 +1661,9 @@ resource "null_resource" "pre_deployment_check" {
       echo "Checking for existing domain..."
       DOMAIN_NAME="${local.sanitized_hostname}"
       
-      if sudo virsh dominfo "$DOMAIN_NAME" >/dev/null 2>&1; then
+      if $VIRSH_CMD dominfo "$DOMAIN_NAME" >/dev/null 2>&1; then
         echo "⚠ Domain already exists: $DOMAIN_NAME"
-        DOMAIN_STATE=$(sudo virsh domstate "$DOMAIN_NAME" 2>/dev/null || echo "unknown")
+        DOMAIN_STATE=$($VIRSH_CMD domstate "$DOMAIN_NAME" 2>/dev/null || echo "unknown")
         echo "  Current state: $DOMAIN_STATE"
         
         # Check if domain is in Terraform state
@@ -1609,15 +1680,15 @@ resource "null_resource" "pre_deployment_check" {
       # Step 7: Verify storage pool exists and is active
       echo ""
       echo "Verifying storage pool status..."
-      if ! sudo virsh pool-info "$POOL_NAME" >/dev/null 2>&1; then
+      if ! $VIRSH_CMD pool-info "$POOL_NAME" >/dev/null 2>&1; then
         log_error "Storage pool '$POOL_NAME' not found"
         log_error "Please ensure the pool is defined and started"
         exit 1
       fi
 
-      if ! sudo virsh pool-list --persistent | grep -q "$POOL_NAME"; then
+      if ! $VIRSH_CMD pool-list --persistent | grep -q "$POOL_NAME"; then
         echo "⚠ Storage pool '$POOL_NAME' is not active. Attempting to start..."
-        if ! sudo virsh pool-start "$POOL_NAME" 2>/dev/null; then
+        if ! $VIRSH_CMD pool-start "$POOL_NAME" 2>/dev/null; then
           log_error "Could not start storage pool '$POOL_NAME'"
           exit 1
         fi
@@ -1626,7 +1697,7 @@ resource "null_resource" "pre_deployment_check" {
       # Step 8: Verify storage pool has enough space
       echo ""
       echo "Checking storage pool capacity..."
-      POOL_INFO=$(sudo virsh pool-info "$POOL_NAME" 2>/dev/null || echo "")
+      POOL_INFO=$($VIRSH_CMD pool-info "$POOL_NAME" 2>/dev/null || echo "")
       if [ -n "$POOL_INFO" ]; then
         AVAILABLE=$(echo "$POOL_INFO" | grep "Available:" | awk '{print $2}')
         echo "  Available space: $AVAILABLE"
@@ -1713,6 +1784,7 @@ resource "null_resource" "verify_disk_volume" {
       BASE_IMG_NAME="ubuntu-base-img-${local.sanitized_hostname}.qcow2"
       POOL_NAME="${local.pool_name}"
       POOL_PATH="/var/lib/libvirt/images/$POOL_NAME"
+      VIRSH_CMD="virsh -c qemu:///system"
       MAX_RETRIES=20
       RETRY_COUNT=0
       DISK_FOUND=false
@@ -1722,7 +1794,7 @@ resource "null_resource" "verify_disk_volume" {
       echo "Step 1: Refreshing storage pool..."
       for i in {1..5}; do
         echo "  Refresh attempt $i/5..."
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
         sleep 2
       done
       echo "✓ Pool refresh complete"
@@ -1741,21 +1813,21 @@ resource "null_resource" "verify_disk_volume" {
         echo "  Verification attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
         
         # Refresh pool before check
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
         sleep 2
         
         # Check base image in libvirt pool
-        if sudo virsh vol-list "$POOL_NAME" | grep -q "$BASE_IMG_NAME"; then
+        if $VIRSH_CMD vol-list "$POOL_NAME" | grep -q "$BASE_IMG_NAME"; then
           echo "  ✓ Base image found in libvirt pool"
           BASE_FOUND=true
           break
         fi
         
         # Check in filesystem
-        if sudo test -f "$POOL_PATH/$BASE_IMG_NAME"; then
+        if test -f "$POOL_PATH/$BASE_IMG_NAME"; then
           echo "  ⚠ Base image exists in filesystem but not visible in pool"
           echo "  Attempting pool refresh..."
-          sudo virsh pool-refresh "$POOL_NAME" || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" || true
           sleep 3
         else
           echo "  ⚠ Base image not found in filesystem: $POOL_PATH/$BASE_IMG_NAME"
@@ -1774,10 +1846,10 @@ resource "null_resource" "verify_disk_volume" {
         echo ""
         echo "Diagnostic Information:"
         echo "1. Pool contents:"
-        sudo virsh vol-list "$POOL_NAME"
+        $VIRSH_CMD vol-list "$POOL_NAME"
         echo ""
         echo "2. Filesystem contents:"
-        sudo ls -lh "$POOL_PATH/" | grep -E "(ubuntu-base|qcow2)" || echo "  No disk volumes found"
+        ls -lh "$POOL_PATH/" | grep -E "(ubuntu-base|qcow2)" || echo "  No disk volumes found"
         echo ""
         echo "3. Check download status:"
         echo "  ls -lh ${abspath(path.module)}/.cache/"
@@ -1794,27 +1866,27 @@ resource "null_resource" "verify_disk_volume" {
         echo "  Verification attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
         
         # Refresh pool before check
-        sudo virsh pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
+        $VIRSH_CMD pool-refresh "$POOL_NAME" >/dev/null 2>&1 || true
         sleep 2
         
         # Check in libvirt pool
-        if sudo virsh vol-list "$POOL_NAME" | grep -q "$DISK_NAME"; then
+        if $VIRSH_CMD vol-list "$POOL_NAME" | grep -q "$DISK_NAME"; then
           echo "  ✓ Disk found in libvirt pool"
           DISK_FOUND=true
           break
         fi
         
         # Check in filesystem
-        if sudo test -f "$POOL_PATH/$DISK_NAME"; then
+        if test -f "$POOL_PATH/$DISK_NAME"; then
           echo "  ⚠ Disk exists in filesystem but not visible in pool"
           echo "  Attempting pool refresh..."
-          sudo virsh pool-refresh "$POOL_NAME" || true
+          $VIRSH_CMD pool-refresh "$POOL_NAME" || true
           sleep 3
         else
           echo "  ⚠ Disk not found in filesystem: $POOL_PATH/$DISK_NAME"
           echo "  Checking if base image is accessible..."
           
-          if sudo qemu-img info "$POOL_PATH/$BASE_IMG_NAME" >/dev/null 2>&1; then
+          if qemu-img info "$POOL_PATH/$BASE_IMG_NAME" >/dev/null 2>&1; then
             echo "  Base image is accessible, disk creation may be in progress..."
           else
             echo "  ✗ Base image is not accessible!"
@@ -1839,22 +1911,22 @@ resource "null_resource" "verify_disk_volume" {
         # Get disk details
         echo ""
         echo "Disk Details:"
-        sudo virsh vol-info "$DISK_NAME" --pool "$POOL_NAME" || true
+        $VIRSH_CMD vol-info "$DISK_NAME" --pool "$POOL_NAME" || true
         
         # Check filesystem
-        if sudo test -f "$POOL_PATH/$DISK_NAME"; then
+        if test -f "$POOL_PATH/$DISK_NAME"; then
           echo ""
           echo "Filesystem Details:"
-          sudo ls -lh "$POOL_PATH/$DISK_NAME"
+          ls -lh "$POOL_PATH/$DISK_NAME"
         fi
         
         # Verify disk is readable
         echo ""
         echo "Verifying disk accessibility..."
         IN_USE_BY=""
-        for vm in $(sudo virsh list --state-running --name 2>/dev/null); do
+        for vm in $($VIRSH_CMD list --state-running --name 2>/dev/null); do
           [ -z "$vm" ] && continue
-          if sudo virsh domblklist "$vm" 2>/dev/null | grep -q "$DISK_NAME"; then
+          if $VIRSH_CMD domblklist "$vm" 2>/dev/null | grep -q "$DISK_NAME"; then
             IN_USE_BY="$vm"
             break
           fi
@@ -1864,9 +1936,9 @@ resource "null_resource" "verify_disk_volume" {
           echo "⚠ Disk is currently attached to running domain: $IN_USE_BY"
           echo "Skipping qemu-img checks to avoid lock errors"
         else
-          if sudo qemu-img info "$POOL_PATH/$DISK_NAME" >/dev/null 2>&1; then
+          if qemu-img info "$POOL_PATH/$DISK_NAME" >/dev/null 2>&1; then
             echo "✓ Disk is readable and valid qcow2 format"
-            sudo qemu-img info "$POOL_PATH/$DISK_NAME" | grep -E "(file format|virtual size|disk size|backing file)"
+            qemu-img info "$POOL_PATH/$DISK_NAME" | grep -E "(file format|virtual size|disk size|backing file)"
           else
             echo "⚠ WARNING: Disk exists but may be corrupted"
           fi
@@ -1874,10 +1946,10 @@ resource "null_resource" "verify_disk_volume" {
           # Verify backing file relationship
           echo ""
           echo "Verifying backing file relationship..."
-          BACKING_FILE=$(sudo qemu-img info "$POOL_PATH/$DISK_NAME" | grep "backing file:" | awk '{print $3}')
+          BACKING_FILE=$(qemu-img info "$POOL_PATH/$DISK_NAME" | grep "backing file:" | awk '{print $3}')
           if [ -n "$BACKING_FILE" ]; then
             echo "✓ Backing file: $BACKING_FILE"
-            if sudo test -f "$BACKING_FILE"; then
+            if test -f "$BACKING_FILE"; then
               echo "✓ Backing file exists and is accessible"
             else
               echo "⚠ WARNING: Backing file path may be incorrect"
@@ -1895,19 +1967,19 @@ resource "null_resource" "verify_disk_volume" {
         echo ""
         echo "Diagnostic Information:"
         echo "1. Pool contents:"
-        sudo virsh vol-list "$POOL_NAME"
+        $VIRSH_CMD vol-list "$POOL_NAME"
         echo ""
         echo "2. Filesystem contents:"
-        sudo ls -lh "$POOL_PATH/" | grep -E "(ubuntu-disk|qcow2)" || echo "  No disk volumes found"
+        ls -lh "$POOL_PATH/" | grep -E "(ubuntu-disk|qcow2)" || echo "  No disk volumes found"
         echo ""
         echo "3. Pool information:"
-        sudo virsh pool-info "$POOL_NAME"
+        $VIRSH_CMD pool-info "$POOL_NAME"
         echo ""
         echo "4. Check Terraform state:"
         echo "  terraform state show 'module.kvm_ubuntu.libvirt_volume.ubuntu_base'"
         echo ""
         echo "5. Check base image:"
-        sudo qemu-img info "$POOL_PATH/$BASE_IMG_NAME" || echo "  Base image check failed"
+        qemu-img info "$POOL_PATH/$BASE_IMG_NAME" || echo "  Base image check failed"
         echo ""
         echo "Possible causes:"
         echo "  - libvirt_volume.ubuntu_base creation failed"
@@ -1918,8 +1990,8 @@ resource "null_resource" "verify_disk_volume" {
         echo ""
         echo "Recommended actions:"
         echo "  1. Check available space: df -h $POOL_PATH"
-        echo "  2. Check pool permissions: sudo ls -ld $POOL_PATH"
-        echo "  3. Verify base image: sudo qemu-img info $POOL_PATH/$BASE_IMG_NAME"
+        echo "  2. Check pool permissions: ls -ld $POOL_PATH"
+        echo "  3. Verify base image: qemu-img info $POOL_PATH/$BASE_IMG_NAME"
         echo "  4. Check Terraform logs for volume creation errors"
         echo "  5. Try: terraform taint module.kvm_ubuntu.libvirt_volume.ubuntu_base"
         echo "  6. Check libvirt logs: sudo journalctl -u libvirtd -n 100"
@@ -2449,7 +2521,7 @@ resource "null_resource" "wait_for_ssh" {
     EOT
 
     interpreter = ["/bin/bash", "-c"]
-    on_failure  = fail  # Changed from continue to fail for better error handling
+    on_failure  = fail # Changed from continue to fail for better error handling
   }
 
   triggers = {
@@ -2491,7 +2563,7 @@ resource "null_resource" "wait_for_k3s" {
       MAX_ITERATIONS=$((MAX_WAIT_MINUTES * 60 / CHECK_INTERVAL))
       
       # SSH configuration
-      SSH_OPTS="-o StrictHostKeyChecking=no"
+      SSH_OPTS="-F /dev/null -o StrictHostKeyChecking=no"
       SSH_OPTS="$SSH_OPTS -o UserKnownHostsFile=/dev/null"
       SSH_OPTS="$SSH_OPTS -o ConnectTimeout=10"
       SSH_OPTS="$SSH_OPTS -o BatchMode=yes"
@@ -2754,7 +2826,7 @@ resource "null_resource" "wait_for_k3s" {
   }
 
   triggers = {
-    vm_id = libvirt_domain.ubuntu_vm.id
+    vm_id     = libvirt_domain.ubuntu_vm.id
     node_ip   = local.node_ip
     timestamp = timestamp()
   }
@@ -2849,7 +2921,7 @@ resource "null_resource" "deployment_summary" {
       echo "  Username: ${var.ssh_username}"
       echo "  Memory: ${var.vm_memory} MB"
       echo "  vCPU: ${var.vm_vcpu}"
-      echo "  Disk Size: $(echo "scale=2; ${var.vm_disk_size} / 1024 / 1024 / 1024" | bc) GB"
+      echo "  Disk Size: $(awk 'BEGIN {printf "%.2f", ${var.vm_disk_size} / 1024 / 1024 / 1024}') GB"
       echo ""
       
       echo "=== Network Configuration ==="
@@ -3003,38 +3075,20 @@ resource "null_resource" "cleanup_on_destroy" {
       echo "VM: ${self.triggers.hostname}"
       echo "Pool: ${self.triggers.pool_name}"
       echo ""
+
+      VIRSH_CMD="virsh -c qemu:///system"
       
       # Stop VM if running
       echo "Checking VM state..."
-      if sudo virsh domstate "${self.triggers.hostname}" 2>/dev/null | grep -q "running"; then
+      if $VIRSH_CMD domstate "${self.triggers.hostname}" 2>/dev/null | grep -q "running"; then
         echo "Stopping VM..."
-        sudo virsh destroy "${self.triggers.hostname}" 2>/dev/null || true
+        $VIRSH_CMD destroy "${self.triggers.hostname}" 2>/dev/null || true
         sleep 3
       fi
       
-      # Undefine VM
-      echo "Undefining VM..."
-      sudo virsh undefine "${self.triggers.hostname}" --remove-all-storage 2>/dev/null || true
-      sleep 2
-      
-      # Clean up volumes
-      echo "Cleaning up volumes..."
-      VOLUMES=(
-        "cloudinit-${self.triggers.hostname}.iso"
-        "ubuntu-disk-${self.triggers.hostname}.qcow2"
-        "ubuntu-base-img-${self.triggers.hostname}.qcow2"
-      )
-      
-      for VOL in "$${VOLUMES[@]}"; do
-        if sudo virsh vol-info "$VOL" --pool "${self.triggers.pool_name}" >/dev/null 2>&1; then
-          echo "  Deleting volume: $VOL"
-          sudo virsh vol-delete "$VOL" --pool "${self.triggers.pool_name}" 2>/dev/null || true
-        fi
-      done
-      
       # Refresh pool
       echo "Refreshing storage pool..."
-      sudo virsh pool-refresh "${self.triggers.pool_name}" 2>/dev/null || true
+      $VIRSH_CMD pool-refresh "${self.triggers.pool_name}" 2>/dev/null || true
       
       # Clean up kubeconfig
       KUBECONFIG_FILE="${path.root}/kubeconfigs/k3s-${self.triggers.hostname}.yaml"

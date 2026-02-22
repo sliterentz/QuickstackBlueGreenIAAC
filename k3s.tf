@@ -1,10 +1,14 @@
 resource "null_resource" "k3s_install" {
   depends_on = [module.kvm_ubuntu]
 
+  triggers = {
+    vm_id = module.kvm_ubuntu.vm_id
+  }
+
   connection {
     type        = "ssh"
     user        = var.ssh_username
-    private_key = file(var.ssh_private_key_path)
+    private_key = file(pathexpand(var.ssh_private_key_path))
     host        = var.server_ips[0]
     timeout     = "10m" # Meningkatkan timeout threshold untuk koneksi awal
   }
@@ -59,7 +63,7 @@ resource "null_resource" "k3s_install" {
       echo 'Attempting to fetch kubeconfig from remote VM...'
       MAX_RETRIES=5
       RETRY_COUNT=0
-      until scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${var.ssh_private_key_path} ${var.ssh_username}@${var.server_ips[0]}:/tmp/kubeconfig ${path.module}/kubeconfig || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+      until scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${pathexpand(var.ssh_private_key_path)} ${var.ssh_username}@${var.server_ips[0]}:/tmp/kubeconfig ${path.module}/kubeconfig || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
         echo "SCP failed, retrying in 5 seconds... ($((RETRY_COUNT+1))/$MAX_RETRIES)"
         sleep 5
         RETRY_COUNT=$((RETRY_COUNT+1))
@@ -82,7 +86,59 @@ resource "null_resource" "k3s_install" {
 resource "null_resource" "wait_for_cluster" {
   depends_on = [null_resource.k3s_install]
 
+  triggers = {
+    k3s_install_id = null_resource.k3s_install.id
+  }
+
   provisioner "local-exec" {
-    command = "sleep 120 && KUBECONFIG=./kubeconfig kubectl wait --for=condition=Ready nodes --all --timeout=600s"
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+
+      KUBECONFIG_PATH="${path.module}/kubeconfig"
+      EXPECTED_MASTER="${var.vm_hostname}"
+      EXPECTED_WORKERS=${var.worker_n8n_count}
+
+      echo "=== Waiting for cluster nodes to be Ready ==="
+      echo "Timestamp: $(date)"
+      echo "KUBECONFIG: $KUBECONFIG_PATH"
+      echo "Master: $EXPECTED_MASTER"
+      echo "Expected n8n workers: $EXPECTED_WORKERS"
+      echo ""
+
+      sleep 30
+
+      echo "Waiting for master node to be Ready..."
+      KUBECONFIG="$KUBECONFIG_PATH" kubectl wait --for=condition=Ready "node/$EXPECTED_MASTER" --timeout=2400s
+
+      if [ "$EXPECTED_WORKERS" -gt 0 ]; then
+        for idx in $(seq 1 "$EXPECTED_WORKERS"); do
+          WORKER_NAME="${var.worker_n8n_hostname}-$idx"
+          echo ""
+          echo "Waiting for worker node to be registered: $WORKER_NAME"
+
+          MAX_WAIT_SECONDS=1800
+          INTERVAL_SECONDS=10
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $MAX_WAIT_SECONDS ]; do
+            if KUBECONFIG="$KUBECONFIG_PATH" kubectl get node "$WORKER_NAME" >/dev/null 2>&1; then
+              echo "✓ Node object exists: $WORKER_NAME"
+              break
+            fi
+            [ $((ELAPSED % 60)) -eq 0 ] && KUBECONFIG="$KUBECONFIG_PATH" kubectl get nodes -o wide 2>/dev/null || true
+            sleep $INTERVAL_SECONDS
+            ELAPSED=$((ELAPSED + INTERVAL_SECONDS))
+          done
+
+          echo "Waiting for worker node to become Ready: $WORKER_NAME"
+          KUBECONFIG="$KUBECONFIG_PATH" kubectl wait --for=condition=Ready "node/$WORKER_NAME" --timeout=2400s
+        done
+      fi
+
+      echo ""
+      echo "✓ Cluster node readiness check complete"
+      KUBECONFIG="$KUBECONFIG_PATH" kubectl get nodes -o wide || true
+    EOT
   }
 }

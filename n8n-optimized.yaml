@@ -69,8 +69,46 @@ spec:
         app: n8n
         component: main
     spec:
-      nodeSelector:
-        workload: n8n
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - n8n
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - n8n-worker-1
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /home/node/.n8n"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z postgres.kube-system-green.svc.cluster.local 5432; do echo waiting for postgres; sleep 2; done"
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z redis.kube-system-green.svc.cluster.local 6379; do echo waiting for redis; sleep 2; done"
       containers:
         - name: n8n
           image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
@@ -82,14 +120,16 @@ spec:
               value: "${n8n_hostname}"
             - name: N8N_PORT
               value: "5678"
+            - name: N8N_LISTEN_ADDRESS
+              value: "0.0.0.0"
             - name: N8N_PROTOCOL
-              value: "https"
+              value: "http"
             - name: N8N_PATH
               value: "/n8n/"
             - name: N8N_EDITOR_BASE_URL
-              value: "https://${n8n_hostname}/n8n/"
+              value: "http://${n8n_hostname}/n8n/"
             - name: WEBHOOK_URL
-              value: "https://${n8n_hostname}/n8n/"
+              value: "http://${n8n_hostname}/n8n/"
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
             - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
@@ -140,19 +180,27 @@ spec:
             limits:
               memory: "${main_limits_memory}"
               cpu: "${main_limits_cpu}"
+          startupProbe:
+            tcpSocket:
+              port: 5678
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 60
           readinessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 5678
             initialDelaySeconds: 30
             periodSeconds: 10
-            failureThreshold: 6
+            timeoutSeconds: 1
+            failureThreshold: 12
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 5678
             initialDelaySeconds: 60
             periodSeconds: 15
+            timeoutSeconds: 1
+            failureThreshold: 6
           volumeMounts:
             - name: n8n-data
               mountPath: /home/node/.n8n
@@ -188,8 +236,52 @@ spec:
         app: n8n
         component: worker
     spec:
-      nodeSelector:
-        workload: n8n
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - n8n
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - n8n-worker-1
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /home/node/.n8n"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z postgres.kube-system-green.svc.cluster.local 5432; do echo waiting for postgres; sleep 2; done"
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z redis.kube-system-green.svc.cluster.local 6379; do echo waiting for redis; sleep 2; done"
+        - name: wait-for-n8n-main
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z n8n-service 80; do sleep 2; done"
       containers:
         - name: n8n
           image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
@@ -198,9 +290,13 @@ spec:
           env:
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
+            - name: N8N_LISTEN_ADDRESS
+              value: "0.0.0.0"
             - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
               value: "true"
             - name: N8N_RUNNERS_ENABLED
+              value: "true"
+            - name: N8N_SKIP_DB_MIGRATIONS
               value: "true"
             - name: EXECUTIONS_MODE
               value: "queue"
@@ -308,8 +404,52 @@ spec:
         app: n8n
         component: webhook
     spec:
-      nodeSelector:
-        workload: n8n
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - n8n
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - n8n-worker-1
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /home/node/.n8n"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z postgres.kube-system-green.svc.cluster.local 5432; do echo waiting for postgres; sleep 2; done"
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z redis.kube-system-green.svc.cluster.local 6379; do echo waiting for redis; sleep 2; done"
+        - name: wait-for-n8n-main
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z n8n-service 80; do sleep 2; done"
       containers:
         - name: n8n
           image: docker.n8n.io/n8nio/n8n:${n8n_image_tag}
@@ -318,13 +458,19 @@ spec:
           ports:
             - containerPort: 5678
           env:
+            - name: N8N_PORT
+              value: "5678"
             - name: WEBHOOK_URL
-              value: "https://${n8n_hostname}/n8n/"
+              value: "http://${n8n_hostname}/n8n/"
             - name: GENERIC_TIMEZONE
               value: "${timezone}"
+            - name: N8N_LISTEN_ADDRESS
+              value: "0.0.0.0"
             - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
               value: "true"
             - name: N8N_RUNNERS_ENABLED
+              value: "true"
+            - name: N8N_SKIP_DB_MIGRATIONS
               value: "true"
             - name: EXECUTIONS_MODE
               value: "queue"
@@ -370,19 +516,27 @@ spec:
             limits:
               memory: "${webhook_limits_memory}"
               cpu: "${webhook_limits_cpu}"
+          startupProbe:
+            tcpSocket:
+              port: 5678
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 60
           readinessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 5678
             initialDelaySeconds: 30
             periodSeconds: 10
-            failureThreshold: 6
+            timeoutSeconds: 1
+            failureThreshold: 12
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: 5678
             initialDelaySeconds: 60
             periodSeconds: 15
+            timeoutSeconds: 1
+            failureThreshold: 6
           volumeMounts:
             - name: n8n-data
               mountPath: /home/node/.n8n

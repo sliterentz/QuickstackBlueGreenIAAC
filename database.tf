@@ -53,6 +53,11 @@ resource "kubernetes_stateful_set" "postgres" {
             value = local.databases.postgres.db_name
           }
 
+          env {
+            name  = "POSTGRES_HOST_AUTH_METHOD"
+            value = "scram-sha-256"
+          }
+
           volume_mount {
             name       = "init-script"
             mount_path = "/docker-entrypoint-initdb.d"
@@ -65,12 +70,12 @@ resource "kubernetes_stateful_set" "postgres" {
 
           resources {
             requests = {
-              cpu    = "20m"
-              memory = "32Mi"
+              cpu    = "100m"
+              memory = "256Mi"
             }
             limits = {
-              cpu    = "200m"
-              memory = "128Mi"
+              cpu    = "500m"
+              memory = "512Mi"
             }
           }
 
@@ -90,6 +95,16 @@ resource "kubernetes_stateful_set" "postgres" {
             failure_threshold     = local.databases.postgres.probes.readiness.failure_threshold
           }
 
+          startup_probe {
+            exec {
+              command = local.databases.postgres.probes.readiness.command
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+            timeout_seconds       = 5
+            failure_threshold     = 120
+          }
+
           liveness_probe {
             exec {
               command = local.databases.postgres.probes.liveness.command
@@ -104,7 +119,8 @@ resource "kubernetes_stateful_set" "postgres" {
         volume {
           name = "init-script"
           config_map {
-            name = kubernetes_config_map.postgres_init_script[each.key].metadata[0].name
+            name         = kubernetes_config_map.postgres_init_script[each.key].metadata[0].name
+            default_mode = "0755"
           }
         }
       }
@@ -203,12 +219,12 @@ resource "kubernetes_stateful_set" "mariadb" {
 
           resources {
             requests = {
-              cpu    = "20m"
-              memory = "32Mi"
+              cpu    = "100m"
+              memory = "256Mi"
             }
             limits = {
-              cpu    = "200m"
-              memory = "128Mi"
+              cpu    = "500m"
+              memory = "512Mi"
             }
           }
 

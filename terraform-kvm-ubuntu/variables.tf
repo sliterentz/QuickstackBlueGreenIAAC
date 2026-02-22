@@ -84,6 +84,11 @@ variable "ssh_public_key" {
   type        = string
   # Ganti dengan path ke public key Anda yang sebenarnya, misal ~/.ssh/id_rsa.pub
   default = "~/.ssh/id_rsa.pub"
+
+  validation {
+    condition     = can(regex("^ssh-", var.ssh_public_key)) || can(regex("\\.pub$", var.ssh_public_key))
+    error_message = "ssh_public_key harus berupa string public key yang diawali 'ssh-' atau path file yang berakhiran '.pub'."
+  }
 }
 
 variable "ssh_username" {
@@ -215,8 +220,8 @@ variable "ssh_timeout" {
 variable "ssh_private_key_path" {
   description = "Path to SSH private key for accessing the VM"
   type        = string
-  default     = "~/.ssh/id_rsa"  # Default SSH key path
-  
+  default     = "~/.ssh/id_rsa" # Default SSH key path
+
   validation {
     condition     = can(regex("^[~/].*", var.ssh_private_key_path))
     error_message = "SSH private key path must be an absolute path or start with ~/"

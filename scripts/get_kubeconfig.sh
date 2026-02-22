@@ -56,13 +56,31 @@ if [ -z "$KUBE_CONFIG_PATH" ]; then
     fi
 fi
 
-# 4. Periksa File Lokal di Modul (Fallback terakhir)
+# 4. Periksa kubeconfig hasil deployment (kubeconfigs/) jika ada
+if [ -z "$KUBE_CONFIG_PATH" ]; then
+    KUBECONFIGS_DIR="$(pwd)/kubeconfigs"
+    log "Memeriksa direktori kubeconfigs: $KUBECONFIGS_DIR"
+    if [ -d "$KUBECONFIGS_DIR" ]; then
+        CANDIDATE=$(ls -1 "$KUBECONFIGS_DIR"/k3s-*.yaml 2>/dev/null | head -1 || true)
+        if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE" ]; then
+            KUBE_CONFIG_PATH="$CANDIDATE"
+            log "Ditemukan di kubeconfigs: $KUBE_CONFIG_PATH"
+        fi
+    fi
+fi
+
+# 5. Periksa File Lokal di Modul (Fallback terakhir)
 if [ -z "$KUBE_CONFIG_PATH" ]; then
     LOCAL_PATH="$(pwd)/kubeconfig"
     log "Memeriksa file lokal: $LOCAL_PATH"
     if [ -f "$LOCAL_PATH" ]; then
-        KUBE_CONFIG_PATH="$LOCAL_PATH"
-        log "Ditemukan di file lokal: $KUBE_CONFIG_PATH"
+        SERVER_URL=$(grep -m1 -E '^[[:space:]]*server:' "$LOCAL_PATH" 2>/dev/null | awk '{print $2}' || true)
+        if echo "$SERVER_URL" | grep -qE '^https://127\.0\.0\.1:6443$'; then
+            log "Menemukan kubeconfig lokal dummy (server 127.0.0.1). Mengabaikan."
+        else
+            KUBE_CONFIG_PATH="$LOCAL_PATH"
+            log "Ditemukan di file lokal: $KUBE_CONFIG_PATH"
+        fi
     fi
 fi
 

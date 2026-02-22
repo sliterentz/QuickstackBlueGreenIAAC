@@ -67,14 +67,14 @@ locals {
       probes = {
         readiness = {
           command           = ["pg_isready", "-U", "postgres"]
-          initial_delay     = 5
+          initial_delay     = 30
           period            = 10
           timeout           = 5
           failure_threshold = 6
         }
         liveness = {
           command           = ["pg_isready", "-U", "postgres"]
-          initial_delay     = 15
+          initial_delay     = 120
           period            = 10
           timeout           = 5
           failure_threshold = 6
@@ -94,7 +94,7 @@ locals {
           command           = ["sh", "-c", "mysqladmin ping -u root -p$MYSQL_ROOT_PASSWORD"]
           initial_delay     = 5
           period            = 10
-          timeout           = 1
+          timeout           = 5
           failure_threshold = 3
         }
         liveness = {

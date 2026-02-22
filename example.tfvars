@@ -105,7 +105,7 @@ ssh_timeout       = 300
 
 # SSH Public Key (opsional, jika menggunakan KVM module)
 # ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... your-key-here"
-ssh_public_key = "~/.ssh/id_rsa"
+ssh_public_key = "~/.ssh/id_rsa.pub"
 
 # Integration Credentials (will be used inside n8n UI, but good to have ready)
 open_api_key                  = "changeme_key"

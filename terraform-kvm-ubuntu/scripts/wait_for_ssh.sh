@@ -63,10 +63,15 @@ MAX_WAIT_AUTH=300         # 5 minutes for SSH auth
 MAX_WAIT_CLOUDINIT=600    # 10 minutes for cloud-init
 CHECK_INTERVAL=5
 
-# Determine virsh command
-VIRSH_CMD="virsh"
-if ! virsh list --all >/dev/null 2>&1; then
-    VIRSH_CMD="sudo virsh"
+# Timing (avoid unbound variables with set -u)
+ELAPSED_NETWORK=0
+ELAPSED_PORT=0
+ELAPSED_AUTH=0
+ELAPSED_CLOUDINIT=0
+
+VIRSH_CMD="virsh -c qemu:///system"
+if ! $VIRSH_CMD version >/dev/null 2>&1; then
+    VIRSH_CMD=""
 fi
 
 # ============================================================================
@@ -92,6 +97,10 @@ if [ -z "$TARGET_IP" ]; then
     
     while [ $ELAPSED -lt $MAX_DETECT_TIME ]; do
         # Try QEMU agent first (more reliable)
+        if [ -z "$VIRSH_CMD" ]; then
+            break
+        fi
+
         DETECTED_IP=$($VIRSH_CMD domifaddr "$VM_NAME" --source agent 2>/dev/null | \
                       grep -oP '(\d+\.){3}\d+' | \
                       grep -v '^127\.' | \
@@ -126,9 +135,11 @@ if [ -z "$TARGET_IP" ]; then
         log_error "Could not detect IP address after $MAX_DETECT_TIME seconds"
         echo ""
         echo "Diagnostic commands:"
-        echo "  $VIRSH_CMD domifaddr $VM_NAME"
-        echo "  $VIRSH_CMD domifaddr $VM_NAME --source agent"
-        echo "  $VIRSH_CMD console $VM_NAME"
+            if [ -n "$VIRSH_CMD" ]; then
+                echo "  $VIRSH_CMD domifaddr $VM_NAME"
+                echo "  $VIRSH_CMD domifaddr $VM_NAME --source agent"
+                echo "  $VIRSH_CMD console $VM_NAME"
+            fi
         exit 1
     fi
 fi
@@ -203,6 +214,8 @@ if [ "$NETWORK_READY" = false ]; then
     fi
 fi
 
+ELAPSED_NETWORK=$ELAPSED
+
 # ============================================================================
 # STAGE 2: SSH PORT AVAILABILITY CHECK
 # ============================================================================
@@ -257,13 +270,15 @@ if [ "$PORT_OPEN" = false ]; then
     exit 1
 fi
 
+ELAPSED_PORT=$ELAPSED
+
 # ============================================================================
 # STAGE 3: SSH AUTHENTICATION CHECK
 # ============================================================================
 log_stage "STAGE 3: SSH AUTHENTICATION"
 
 # Build SSH options
-SSH_OPTS="-o StrictHostKeyChecking=no"
+SSH_OPTS="-F /dev/null -o StrictHostKeyChecking=no"
 
 SSH_OPTS="$SSH_OPTS -o UserKnownHostsFile=/dev/null"
 SSH_OPTS="$SSH_OPTS -o ConnectTimeout=10"
@@ -391,6 +406,8 @@ if [ "$AUTH_SUCCESS" = false ]; then
     exit 1
 fi
 
+ELAPSED_AUTH=$ELAPSED
+
 # ============================================================================
 # STAGE 4: CLOUD-INIT COMPLETION CHECK
 # ============================================================================
@@ -461,6 +478,8 @@ if [ "$CLOUDINIT_DONE" = false ]; then
     echo ""
     log_warning "Continuing anyway as SSH is functional..."
 fi
+
+ELAPSED_CLOUDINIT=$ELAPSED
 
 # ============================================================================
 # STAGE 5: SYSTEM INFORMATION GATHERING

@@ -47,6 +47,8 @@ declare -A STEP_WEIGHTS=(
 )
 TOTAL_WEIGHT=91
 
+TF_PARALLELISM="${TF_PARALLELISM:-1}"
+
 # Fungsi: Gambar Progress Bar
 draw_progress_bar() {
     local percentage=$1
@@ -95,6 +97,15 @@ print_status() {
     esac
 }
 
+SUDO_CHECK_OUTPUT=""
+if command -v sudo >/dev/null 2>&1; then
+    SUDO_CHECK_OUTPUT="$(sudo -n true 2>&1 || true)"
+    if echo "$SUDO_CHECK_OUTPUT" | grep -qiE "must be owned by uid 0|setuid bit set|owned by uid"; then
+        print_status "warn" "sudo tidak dapat digunakan (permission/ownership rusak). Menjalankan perintah tanpa sudo."
+        sudo() { "$@"; }
+    fi
+fi
+
 # Fungsi: Penanganan Error
 handle_error() {
     local exit_code=$1
@@ -129,28 +140,28 @@ verify_libvirt_pool() {
     local pool_path="/var/lib/libvirt/images/${pool_name}"
     
     # Check if pool exists
-    if ! sudo virsh pool-list --all | grep -q "$pool_name"; then
+    if ! virsh pool-list --all | grep -q "$pool_name"; then
         print_status "error" "Storage pool '$pool_name' not found"
         print_status "info" "Attempting to create storage pool..."
 
         # Create pool if not exists
-        sudo virsh pool-define-as "$pool_name" dir --target "$pool_path" >> "$LOG_FILE" 2>&1 || {
+        virsh pool-define-as "$pool_name" dir --target "$pool_path" >> "$LOG_FILE" 2>&1 || {
             print_status "error" "Failed to define storage pool"
             handle_error 1 "Define Storage Pool"
         }
 
         # PERBAIKAN: Menghapus spasi berlebih sebelum sudo yang menyebabkan error
-        sudo virsh pool-build "$pool_name" >> "$LOG_FILE" 2>&1 || {
+        virsh pool-build "$pool_name" >> "$LOG_FILE" 2>&1 || {
             print_status "error" "Failed to build storage pool"
             handle_error 1 "Build Storage Pool"
         }
         
-        sudo virsh pool-start "$pool_name" >> "$LOG_FILE" 2>&1 || {
+        virsh pool-start "$pool_name" >> "$LOG_FILE" 2>&1 || {
             print_status "error" "Failed to start storage pool"
             handle_error 1 "Start Storage Pool"
         }
         
-        sudo virsh pool-autostart "$pool_name" >> "$LOG_FILE" 2>&1 || {
+        virsh pool-autostart "$pool_name" >> "$LOG_FILE" 2>&1 || {
             print_status "warn" "Failed to set pool autostart (non-critical)"
         }
         
@@ -158,42 +169,31 @@ verify_libvirt_pool() {
     fi
     
     # Check if pool is active
-    if ! sudo virsh pool-list | grep -q "$pool_name"; then
+    if ! virsh pool-list | grep -q "$pool_name"; then
         print_status "info" "Activating storage pool..."
-        sudo virsh pool-start "$pool_name" >> "$LOG_FILE" 2>&1 || {
+        virsh pool-start "$pool_name" >> "$LOG_FILE" 2>&1 || {
             print_status "error" "Failed to start storage pool"
             handle_error 1 "Start Storage Pool"
         }
     fi
     
-    # Verify pool path exists and is writable
     if [[ ! -d "$pool_path" ]]; then
-        print_status "warn" "Pool path does not exist, creating: $pool_path"
-        sudo mkdir -p "$pool_path" >> "$LOG_FILE" 2>&1 || {
-            print_status "error" "Failed to create pool path"
-            handle_error 1 "Create Pool Path"
-        }
-        sudo chmod 755 "$pool_path" >> "$LOG_FILE" 2>&1
+        print_status "warn" "Pool path does not exist: $pool_path"
     fi
-    
-     # Check write permission
-    if ! sudo test -w "$pool_path"; then
-        print_status "warn" "Pool path is not writable, fixing permissions..."
-        sudo chmod 755 "$pool_path" >> "$LOG_FILE" 2>&1 || {
-            print_status "error" "Failed to fix pool path permissions"
-            handle_error 1 "Fix Pool Permissions"
-        }
+
+    if [[ -d "$pool_path" ]] && ! test -w "$pool_path"; then
+        print_status "warn" "Pool path is not writable by current user: $pool_path (non-critical jika libvirt berjalan sebagai root)"
     fi
     
     # Refresh pool to sync with filesystem
     print_status "info" "Refreshing storage pool..."
-    sudo virsh pool-refresh "$pool_name" >> "$LOG_FILE" 2>&1 || {
+    virsh pool-refresh "$pool_name" >> "$LOG_FILE" 2>&1 || {
         print_status "warn" "Pool refresh failed (non-critical)"
     }
     
     # Display pool info
     print_status "info" "Storage pool status:"
-    sudo virsh pool-info "$pool_name" | tee -a "$LOG_FILE"
+    virsh pool-info "$pool_name" | tee -a "$LOG_FILE"
     
     print_status "success" "Storage pool verified and ready"
     return 0
@@ -208,14 +208,14 @@ verify_storage_volumes() {
     
     # List all volumes in pool
     print_status "info" "Current volumes in pool:"
-    sudo virsh vol-list "$pool_name" 2>&1 | tee -a "$LOG_FILE"
+    virsh vol-list "$pool_name" 2>&1 | tee -a "$LOG_FILE"
     
     # Check for orphaned or problematic volumes
     print_status "info" "Checking for orphaned volumes..."
     
     # List files in pool directory
     print_status "info" "Files in pool directory:"
-    sudo ls -lh "$pool_path" 2>&1 | tee -a "$LOG_FILE"
+    ls -lh "$pool_path" 2>&1 | tee -a "$LOG_FILE"
     
     # Verify each expected volume type
     local volume_types=("ubuntu-base-img" "ubuntu-disk" "cloudinit")
@@ -223,7 +223,7 @@ verify_storage_volumes() {
     
     for vol_type in "${volume_types[@]}"; do
         local vol_count
-        vol_count=$(sudo virsh vol-list "$pool_name" 2>/dev/null | grep -c "$vol_type" || true)
+        vol_count=$(virsh vol-list "$pool_name" 2>/dev/null | grep -c "$vol_type" || true)
         print_status "info" "Found $vol_count volumes of type: $vol_type"
         
         if [[ "$vol_type" == "cloudinit" && $vol_count -eq 0 ]]; then
@@ -244,7 +244,7 @@ verify_storage_volumes() {
             local basename
             basename=$(basename "$file")
 
-            if ! sudo virsh vol-list "$pool_name" 2>/dev/null | grep -q "$basename"; then
+            if ! virsh vol-list "$pool_name" 2>/dev/null | grep -q "$basename"; then
                 print_status "warn" "File exists but not in pool: $basename"
                 found_issues=true
             fi
@@ -395,6 +395,11 @@ verify_network_for_download() {
     
     print_status "error" "Cannot reach Ubuntu cloud images mirror"
     print_status "info" "This may cause timeout during base image download"
+
+    if [[ "${FORCE_MODE:-false}" == "true" ]] || [[ "${DRY_RUN:-false}" == "true" ]]; then
+        print_status "warn" "Continuing despite network check failure due to --force/--dry-run"
+        return 0
+    fi
     
     read -p "Continue anyway? (yes/no): " -r
     if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
@@ -652,6 +657,11 @@ verify_terraform_state() {
 reconcile_libvirt_state() {
     print_status "info" "Reconciling Libvirt volumes with Terraform state..."
 
+    if [[ "${DRY_RUN:-false}" == "true" ]] && ! sudo -n true >/dev/null 2>&1; then
+        print_status "warn" "Skipping libvirt volume reconciliation (dry-run without passwordless sudo)"
+        return 0
+    fi
+
     if [[ ! -f "$PROJECT_ROOT/terraform.tfstate" ]]; then
         print_status "info" "No Terraform state file found, skipping reconciliation"
         return 0
@@ -691,9 +701,44 @@ reconcile_libvirt_state() {
 reconcile_libvirt_domain_state() {
     print_status "info" "Reconciling Libvirt domains with Terraform state..."
 
+    if [[ "${DRY_RUN:-false}" == "true" ]] && ! sudo -n true >/dev/null 2>&1; then
+        print_status "warn" "Skipping libvirt domain reconciliation (dry-run without passwordless sudo)"
+        return 0
+    fi
+
     if [[ ! -f "$PROJECT_ROOT/terraform.tfstate" ]]; then
         print_status "info" "No Terraform state file found, skipping domain reconciliation"
         return 0
+    fi
+
+    local domain_targets
+    domain_targets=$(terraform state list 2>/dev/null | grep -E 'libvirt_domain\.ubuntu_vm$' || true)
+    if [[ -n "$domain_targets" ]]; then
+        while read -r addr; do
+            [[ -z "$addr" ]] && continue
+
+            local domain_name
+            local domain_id
+
+            domain_name=$(terraform state show -no-color "$addr" 2>/dev/null | awk -F'=' '/^[[:space:]]*name[[:space:]]*=/{gsub(/[[:space:]]|"|\r/,"",$2); print $2; exit}')
+            domain_id=$(terraform state show -no-color "$addr" 2>/dev/null | awk -F'=' '/^[[:space:]]*id[[:space:]]*=/{gsub(/[[:space:]]|"|\r/,"",$2); print $2; exit}')
+
+            if [[ -n "$domain_id" ]] && sudo virsh dominfo "$domain_id" >/dev/null 2>&1; then
+                continue
+            fi
+
+            if [[ -n "$domain_name" ]] && sudo virsh dominfo "$domain_name" >/dev/null 2>&1; then
+                print_status "warn" "State drift detected: $addr references missing UUID but domain exists by name ($domain_name). Re-importing..."
+                terraform state rm "$addr" >> "$LOG_FILE" 2>&1 || print_status "warn" "Failed to remove $addr from state (non-fatal)"
+                terraform import -var-file="$VAR_FILE" "$addr" "$domain_name" >> "$LOG_FILE" 2>&1 || print_status "warn" "Failed to import $addr (non-fatal)"
+                continue
+            fi
+
+            if terraform state list 2>/dev/null | grep -qx "$addr"; then
+                print_status "warn" "State drift detected: $addr domain not found in libvirt. Removing from state to avoid delete failures..."
+                terraform state rm "$addr" >> "$LOG_FILE" 2>&1 || print_status "warn" "Failed to remove $addr from state (non-fatal)"
+            fi
+        done <<< "$domain_targets"
     fi
 
     local hostname
@@ -704,12 +749,7 @@ reconcile_libvirt_domain_state() {
     fi
 
     local addr="module.kvm_ubuntu.libvirt_domain.ubuntu_vm"
-    if sudo virsh dominfo "$hostname" >/dev/null 2>&1; then
-        if terraform state list 2>/dev/null | grep -qx "$addr"; then
-            print_status "info" "Libvirt domain exists and is already tracked in state: $hostname"
-            return 0
-        fi
-
+    if sudo virsh dominfo "$hostname" >/dev/null 2>&1 && ! terraform state list 2>/dev/null | grep -qx "$addr"; then
         print_status "warn" "Libvirt domain exists but is not tracked in Terraform state: $hostname"
         print_status "info" "Attempting to import domain into state..."
 
@@ -720,16 +760,16 @@ reconcile_libvirt_domain_state() {
 
         print_status "warn" "Domain import failed. Attempting cleanup to allow recreation..."
 
-        if sudo virsh domstate "$hostname" 2>/dev/null | grep -qi "running"; then
-            print_status "info" "Stopping running domain to release disk locks: $hostname"
-            sudo virsh destroy "$hostname" >> "$LOG_FILE" 2>&1 || true
-            sleep 3
-        fi
+        if sudo virsh dominfo "$hostname" >/dev/null 2>&1; then
+            if sudo virsh domstate "$hostname" 2>/dev/null | grep -qi "running"; then
+                print_status "info" "Stopping running domain to release disk locks: $hostname"
+                sudo virsh destroy "$hostname" >> "$LOG_FILE" 2>&1 || true
+                sleep 3
+            fi
 
-        sudo virsh undefine "$hostname" >> "$LOG_FILE" 2>&1 || true
-        print_status "success" "Domain cleanup completed: $hostname"
-    else
-        print_status "info" "No existing libvirt domain found for: $hostname"
+            sudo virsh undefine "$hostname" >> "$LOG_FILE" 2>&1 || true
+            print_status "success" "Domain cleanup completed: $hostname"
+        fi
     fi
 
     return 0
@@ -764,11 +804,80 @@ verify_kubeconfig_status() {
     return 0
 }
 
+verify_kubernetes_apiserver_status() {
+    print_status "info" "Checking Kubernetes API readiness..."
+
+    local selected_kubeconfig
+    selected_kubeconfig=$(kubeconfig_selected_path || true)
+    if [[ -z "$selected_kubeconfig" ]] || [[ "$selected_kubeconfig" == "NOT_FOUND" ]]; then
+        selected_kubeconfig="${PROJECT_ROOT}/kubeconfig"
+    fi
+
+    if [[ ! -f "$selected_kubeconfig" ]]; then
+        print_status "warn" "No kubeconfig file found for readiness check: $selected_kubeconfig"
+        return 0
+    fi
+
+    local server_url
+    server_url=$(kubeconfig_server_url "$selected_kubeconfig" || true)
+    if [[ -z "$server_url" ]]; then
+        print_status "warn" "Kubeconfig missing server URL: $selected_kubeconfig"
+        return 0
+    fi
+
+    print_status "info" "Using kubeconfig: $selected_kubeconfig"
+    print_status "info" "API server: $server_url"
+
+    if kubeconfig_is_dummy "$selected_kubeconfig"; then
+        print_status "warn" "Kubeconfig is dummy (127.0.0.1). Skipping API readiness check."
+        return 0
+    fi
+
+    if ! command -v kubectl >/dev/null 2>&1; then
+        print_status "warn" "kubectl not found. Skipping API readiness check."
+        return 0
+    fi
+
+    if kube_apiserver_ready "$selected_kubeconfig"; then
+        print_status "info" "✓ Kubernetes apiserver reports ready"
+        KUBECONFIG="$selected_kubeconfig" kubectl get nodes -o wide 2>/dev/null | tee -a "$LOG_FILE" || true
+    else
+        print_status "warn" "Kubernetes apiserver not ready yet (this may be normal during bootstrap)"
+    fi
+
+    return 0
+}
+
+validate_ssh_authentication() {
+    print_status "step" "Validating SSH authentication..."
+
+    local validator="${PROJECT_ROOT}/scripts/validate_ssh_auth.sh"
+    if [[ ! -f "$validator" ]]; then
+        print_status "warn" "SSH validation script not found: $validator"
+        return 0
+    fi
+
+    chmod +x "$validator" 2>/dev/null || true
+
+    if "$validator" --tfvars "$VAR_FILE" --fix-known-hosts >>"$LOG_FILE" 2>&1; then
+        print_status "success" "SSH authentication validated"
+        return 0
+    fi
+
+    print_status "warn" "SSH authentication validation failed (non-critical). See: ./logs/.ssh_auth_validation.log"
+    return 0
+}
+
 # Fungsi: Pre-deployment Checks (Comprehensive)
 comprehensive_preflight_checks() {
     print_status "step" "Comprehensive Pre-flight Checks"
     
     local checks_passed=true
+    local sudo_noninteractive_ok=true
+    if [[ "${DRY_RUN:-false}" == "true" ]] && ! sudo -n true >/dev/null 2>&1; then
+        sudo_noninteractive_ok=false
+        print_status "warn" "Dry-run without passwordless sudo. Skipping libvirt pool/volume checks."
+    fi
     
     # 1. System Requirements
     print_status "info" "Checking system requirements..."
@@ -796,10 +905,15 @@ comprehensive_preflight_checks() {
     else
         print_status "error" "Libvirt service is not running"
         print_status "info" "Attempting to start libvirt..."
-        sudo systemctl start libvirtd || {
-            print_status "error" "Failed to start libvirt service"
+        if [[ "$sudo_noninteractive_ok" == "true" ]]; then
+            sudo systemctl start libvirtd || {
+                print_status "error" "Failed to start libvirt service"
+                checks_passed=false
+            }
+        else
+            print_status "warn" "Cannot start libvirt service without sudo (dry-run)."
             checks_passed=false
-        }
+        fi
     fi
     
     # 3. Network Connectivity
@@ -823,17 +937,19 @@ comprehensive_preflight_checks() {
         print_status "warn" "Terraform providers not initialized (will be done in init step)"
     fi
     
-    # 6. Storage Pool
-    verify_libvirt_pool || checks_passed=false
-    
-    # 7. Storage Volumes
-    verify_storage_volumes || checks_passed=false
-    
-    # 8. NEW: Ensure pool is ready for volume creation
-    ensure_pool_ready_for_volumes || checks_passed=false
-    
-    # 9. NEW: Pre-check base image volume
-    precreate_base_image_volume || checks_passed=false
+    if [[ "$sudo_noninteractive_ok" == "true" ]]; then
+        # 6. Storage Pool
+        verify_libvirt_pool || checks_passed=false
+        
+        # 7. Storage Volumes
+        verify_storage_volumes || checks_passed=false
+        
+        # 8. NEW: Ensure pool is ready for volume creation
+        ensure_pool_ready_for_volumes || checks_passed=false
+        
+        # 9. NEW: Pre-check base image volume
+        precreate_base_image_volume || checks_passed=false
+    fi
     
     # 10. NEW: Verify network connectivity
     verify_network_for_download || checks_passed=false
@@ -843,6 +959,7 @@ comprehensive_preflight_checks() {
     
     # 12. Kubernetes Configuration
     verify_kubeconfig_status || checks_passed=false
+    verify_kubernetes_apiserver_status || checks_passed=false
     
     # Final verdict
     if [[ "$checks_passed" == "true" ]]; then
@@ -900,8 +1017,470 @@ post_deployment_verification() {
     else
         print_status "warn" "No Terraform outputs found"
     fi
+
+    if ! verify_n8n_kubernetes_workloads; then
+        if [[ "${ROLLBACK_N8N_ON_FAILURE:-false}" == "true" ]]; then
+            print_status "warn" "Rollback n8n resources enabled. Attempting terraform destroy -target=kubectl_manifest.n8n..."
+            terraform destroy -var-file="$VAR_FILE" -auto-approve -target="kubectl_manifest.n8n" 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+        return 1
+    fi
     
     print_status "success" "Post-deployment verification completed"
+    return 0
+}
+
+# Fungsi: Verify n8n Kubernetes Workloads and Collect Diagnostics
+verify_n8n_kubernetes_workloads() {
+    print_status "info" "Checking n8n Kubernetes workloads..."
+
+    local selected_kubeconfig
+    selected_kubeconfig=$(kubeconfig_selected_path || true)
+    if [[ -z "$selected_kubeconfig" ]] || [[ "$selected_kubeconfig" == "NOT_FOUND" ]]; then
+        selected_kubeconfig="${PROJECT_ROOT}/kubeconfig"
+    fi
+
+    if [[ ! -f "$selected_kubeconfig" ]]; then
+        print_status "warn" "No kubeconfig file found for workload checks: $selected_kubeconfig"
+        return 0
+    fi
+
+    if kubeconfig_is_dummy "$selected_kubeconfig"; then
+        print_status "warn" "Kubeconfig is dummy (127.0.0.1). Skipping workload checks."
+        return 0
+    fi
+
+    if ! command -v kubectl >/dev/null 2>&1; then
+        print_status "warn" "kubectl not found. Skipping workload checks."
+        return 0
+    fi
+
+    local ns="n8n"
+
+    print_status "info" "Pod summary (namespace: $ns):"
+    KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" -o wide 2>&1 | tee -a "$LOG_FILE" || {
+        print_status "warn" "Failed to query pods in namespace $ns (non-critical)"
+        return 0
+    }
+
+    print_status "info" "Node labels (workload=n8n):"
+    KUBECONFIG="$selected_kubeconfig" kubectl get nodes -l workload=n8n -o wide 2>&1 | tee -a "$LOG_FILE" || true
+
+    local n8n_nodes=""
+    n8n_nodes=$(KUBECONFIG="$selected_kubeconfig" kubectl get nodes -l workload=n8n --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    if [[ -z "$n8n_nodes" ]]; then
+        print_status "warn" "No nodes labeled workload=n8n. n8n pods may schedule onto undesired nodes."
+
+        local candidate_nodes=""
+        candidate_nodes=$(KUBECONFIG="$selected_kubeconfig" kubectl get nodes --no-headers 2>/dev/null | awk '$1 ~ /^n8n-worker-/ {print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+        if [[ -n "$candidate_nodes" ]]; then
+            print_status "info" "Auto-labeling candidate nodes with workload=n8n: $candidate_nodes"
+            for node in $candidate_nodes; do
+                KUBECONFIG="$selected_kubeconfig" kubectl label node "$node" workload=n8n --overwrite 2>&1 | tee -a "$LOG_FILE" || true
+            done
+        fi
+
+        n8n_nodes=$(KUBECONFIG="$selected_kubeconfig" kubectl get nodes -l workload=n8n --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    fi
+
+    print_status "info" "n8n pod distribution by node:"
+    local pod_wide=""
+    pod_wide=$(KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" -o wide --no-headers 2>/dev/null || true)
+    if [[ -n "$pod_wide" ]]; then
+        echo "$pod_wide" | pod_nodes_from_kubectl_wide | summarize_node_counts | tee -a "$LOG_FILE" || true
+    else
+        echo "No pods found in namespace $ns" | tee -a "$LOG_FILE"
+    fi
+
+    local n8n_wait_timeout="${N8N_WAIT_TIMEOUT:-1800s}"
+    local n8n_wait_timeout_seconds
+    n8n_wait_timeout_seconds=$(parse_duration_seconds "$n8n_wait_timeout")
+
+    local node_stability_timeout="${N8N_NODE_STABILITY_TIMEOUT:-300s}"
+    local node_stability_timeout_seconds
+    node_stability_timeout_seconds=$(parse_duration_seconds "$node_stability_timeout")
+
+    if [[ -n "$n8n_nodes" ]] && [[ "$node_stability_timeout_seconds" -gt 0 ]]; then
+        print_status "info" "Ensuring n8n nodes are stable (Ready, no unreachable taint) before waiting for pods..."
+        local stability_start
+        stability_start=$(date +%s)
+        while true; do
+            local stable_count=0
+            for node in $n8n_nodes; do
+                if node_is_ready "$selected_kubeconfig" "$node" && ! node_has_unreachable_taint "$selected_kubeconfig" "$node"; then
+                    stable_count=$((stable_count + 1))
+                else
+                    if ! node_is_ready "$selected_kubeconfig" "$node"; then
+                        print_status "warn" "Node is not Ready: $node"
+                    fi
+                    if node_has_unreachable_taint "$selected_kubeconfig" "$node"; then
+                        print_status "warn" "Node has unreachable taint: $node"
+                    fi
+                fi
+            done
+            if [[ "$stable_count" -gt 0 ]]; then
+                break
+            fi
+            local now
+            now=$(date +%s)
+            if [[ $((now - stability_start)) -ge "$node_stability_timeout_seconds" ]]; then
+                print_status "error" "No stable nodes labeled workload=n8n. Aborting readiness wait."
+                for node in $n8n_nodes; do
+                    KUBECONFIG="$selected_kubeconfig" kubectl describe node "$node" 2>&1 | tee -a "$LOG_FILE" || true
+                done
+                return 1
+            fi
+            sleep 10
+        done
+    fi
+
+    ensure_n8n_deployments_scaled_up "$selected_kubeconfig" "$ns" || true
+
+    print_status "info" "Waiting for n8n pods to become Ready (timeout: $n8n_wait_timeout)..."
+    if ! wait_for_n8n_pods_ready "$selected_kubeconfig" "$ns" "$n8n_wait_timeout_seconds"; then
+        print_status "warn" "n8n pods did not become Ready within timeout. Collecting diagnostics..."
+
+        print_status "info" "PVC status (namespace: $ns):"
+        KUBECONFIG="$selected_kubeconfig" kubectl get pvc -n "$ns" -o wide 2>&1 | tee -a "$LOG_FILE" || true
+
+        print_status "info" "StorageClasses:"
+        KUBECONFIG="$selected_kubeconfig" kubectl get storageclass -o wide 2>&1 | tee -a "$LOG_FILE" || true
+
+        local pending_pvcs=""
+        pending_pvcs=$(KUBECONFIG="$selected_kubeconfig" kubectl get pvc -n "$ns" --no-headers 2>/dev/null | awk '$2!="Bound"{print $1}' | head -n 50 || true)
+        while read -r pvc; do
+            [[ -z "$pvc" ]] && continue
+            print_status "info" "Describe PVC: $pvc"
+            KUBECONFIG="$selected_kubeconfig" kubectl describe pvc -n "$ns" "$pvc" 2>&1 | tee -a "$LOG_FILE" || true
+        done <<< "$pending_pvcs"
+
+        print_status "info" "Recent events (namespace: $ns):"
+        local events_tail=""
+        events_tail=$(KUBECONFIG="$selected_kubeconfig" kubectl get events -n "$ns" --sort-by=.lastTimestamp 2>&1 | tail -n 120 || true)
+        echo "$events_tail" | tee -a "$LOG_FILE" || true
+
+        if echo "$events_tail" | log_contains_containerd_name_reservation_issue; then
+            print_status "error" "Detected container runtime name reservation issue (containerd). Pods may stay in CreateContainerError."
+            print_status "info" "Impacted pods (CreateContainerError):"
+            KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" -o wide --no-headers 2>/dev/null \
+                | awk '$3 ~ /CreateContainerError/ {print $1 "  node=" $7 "  ip=" $6}' \
+                | tee -a "$LOG_FILE" || true
+            print_status "info" "Remediation (run on the affected node, e.g. n8n-worker-1):"
+            echo "  sudo systemctl restart k3s-agent" | tee -a "$LOG_FILE"
+            echo "  sudo k3s crictl ps -a | grep -i n8n || true" | tee -a "$LOG_FILE"
+            echo "  sudo k3s crictl pods -a | grep -i n8n || true" | tee -a "$LOG_FILE"
+        fi
+
+        print_status "info" "Deployment details (namespace: $ns):"
+        for dep in n8n-main n8n-worker n8n-webhook; do
+            KUBECONFIG="$selected_kubeconfig" kubectl describe deployment -n "$ns" "$dep" 2>&1 | tee -a "$LOG_FILE" || true
+        done
+
+        if [[ -n "$n8n_nodes" ]]; then
+            print_status "info" "Node details for workload=n8n:"
+            for node in $n8n_nodes; do
+                KUBECONFIG="$selected_kubeconfig" kubectl describe node "$node" 2>&1 | tee -a "$LOG_FILE" || true
+            done
+        fi
+
+        local not_ready_pods=""
+        not_ready_pods=$(KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" --no-headers 2>/dev/null \
+            | pods_not_fully_ready_from_kubectl_get_noheaders | head -n 50 || true)
+        while read -r pod; do
+            [[ -z "$pod" ]] && continue
+            print_status "info" "Describe pod: $pod"
+            KUBECONFIG="$selected_kubeconfig" kubectl describe pod -n "$ns" "$pod" 2>&1 | tee -a "$LOG_FILE" || true
+
+            if pod_container_has_started_or_terminated "$selected_kubeconfig" "$ns" "$pod" "n8n"; then
+                print_status "info" "Logs (tail=200): $pod"
+                KUBECONFIG="$selected_kubeconfig" kubectl logs -n "$ns" "$pod" --all-containers=true --tail=200 2>&1 | tee -a "$LOG_FILE" || true
+            else
+                print_status "info" "Logs not available yet (container not started): $pod"
+            fi
+
+            if pod_container_has_previous_logs "$selected_kubeconfig" "$ns" "$pod" "n8n"; then
+                print_status "info" "Previous logs (tail=200): $pod"
+                KUBECONFIG="$selected_kubeconfig" kubectl logs -n "$ns" "$pod" --all-containers=true --previous --tail=200 2>&1 | tee -a "$LOG_FILE" || true
+            else
+                print_status "info" "Previous logs not available: $pod"
+            fi
+        done <<< "$not_ready_pods"
+
+        return 1
+    fi
+
+    local bad_pods=""
+    bad_pods=$(KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" --no-headers 2>/dev/null \
+        | awk '$3 ~ /(CreateContainerError|CreateContainerConfigError|CrashLoopBackOff|ErrImagePull|ImagePullBackOff)/ {print $1}' \
+        | head -n 50 || true)
+
+    if [[ -z "$bad_pods" ]]; then
+        print_status "success" "n8n workloads look healthy"
+        return 0
+    fi
+
+    print_status "warn" "Found failing n8n pods. Collecting diagnostics to log..."
+    while read -r pod; do
+        [[ -z "$pod" ]] && continue
+        print_status "info" "Describe pod: $pod"
+        KUBECONFIG="$selected_kubeconfig" kubectl describe pod -n "$ns" "$pod" 2>&1 | tee -a "$LOG_FILE" || true
+
+        if pod_container_has_started_or_terminated "$selected_kubeconfig" "$ns" "$pod" "n8n"; then
+            print_status "info" "Logs (tail=200): $pod"
+            KUBECONFIG="$selected_kubeconfig" kubectl logs -n "$ns" "$pod" --all-containers=true --tail=200 2>&1 | tee -a "$LOG_FILE" || true
+        else
+            print_status "info" "Logs not available yet (container not started): $pod"
+        fi
+
+        if pod_container_has_previous_logs "$selected_kubeconfig" "$ns" "$pod" "n8n"; then
+            print_status "info" "Previous logs (tail=200): $pod"
+            KUBECONFIG="$selected_kubeconfig" kubectl logs -n "$ns" "$pod" --all-containers=true --previous --tail=200 2>&1 | tee -a "$LOG_FILE" || true
+        else
+            print_status "info" "Previous logs not available: $pod"
+        fi
+    done <<< "$bad_pods"
+
+    return 1
+}
+
+pod_nodes_from_kubectl_wide() {
+    awk '{print $7}'
+}
+
+summarize_node_counts() {
+    awk 'NF>0{c[$1]++} END{for (n in c) printf "%s %d\n", n, c[n]}' | sort
+}
+
+log_contains_containerd_name_reservation_issue() {
+    grep -qiE 'failed to reserve container name|is reserved for'
+}
+
+pods_not_fully_ready_from_kubectl_get_noheaders() {
+    awk '{
+        split($2, a, "/")
+        if (a[1] != a[2]) print $1
+    }'
+}
+
+parse_duration_seconds() {
+    local v="${1:-}"
+    if [[ -z "$v" ]]; then
+        echo 0
+        return 0
+    fi
+    if [[ "$v" =~ ^[0-9]+$ ]]; then
+        echo "$v"
+        return 0
+    fi
+    if [[ "$v" =~ ^[0-9]+s$ ]]; then
+        echo "${v%s}"
+        return 0
+    fi
+    if [[ "$v" =~ ^[0-9]+m$ ]]; then
+        echo $(( ${v%m} * 60 ))
+        return 0
+    fi
+    if [[ "$v" =~ ^[0-9]+h$ ]]; then
+        echo $(( ${v%h} * 3600 ))
+        return 0
+    fi
+    echo 0
+    return 0
+}
+
+node_has_unreachable_taint() {
+    local kubeconfig_path="$1"
+    local node_name="$2"
+    local taints=""
+    taints=$(KUBECONFIG="$kubeconfig_path" kubectl get node "$node_name" -o jsonpath='{range .spec.taints[*]}{.key}:{.effect}{"\n"}{end}' 2>/dev/null || true)
+    echo "$taints" | grep -q "^node.kubernetes.io/unreachable:NoExecute$"
+}
+
+node_is_ready() {
+    local kubeconfig_path="$1"
+    local node_name="$2"
+    local ready=""
+    ready=$(KUBECONFIG="$kubeconfig_path" kubectl get node "$node_name" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    [[ "$ready" == "True" ]]
+}
+
+pod_container_has_started_or_terminated() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+    local pod="$3"
+    local container="${4:-n8n}"
+
+    local running=""
+    local terminated=""
+    running=$(KUBECONFIG="$kubeconfig_path" kubectl get pod -n "$ns" "$pod" -o jsonpath="{.status.containerStatuses[?(@.name=='$container')].state.running.startedAt}" 2>/dev/null || true)
+    terminated=$(KUBECONFIG="$kubeconfig_path" kubectl get pod -n "$ns" "$pod" -o jsonpath="{.status.containerStatuses[?(@.name=='$container')].state.terminated.exitCode}" 2>/dev/null || true)
+    [[ -n "$running" || -n "$terminated" ]]
+}
+
+pod_container_has_previous_logs() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+    local pod="$3"
+    local container="${4:-n8n}"
+
+    local last_terminated=""
+    last_terminated=$(KUBECONFIG="$kubeconfig_path" kubectl get pod -n "$ns" "$pod" -o jsonpath="{.status.containerStatuses[?(@.name=='$container')].lastState.terminated.exitCode}" 2>/dev/null || true)
+    [[ -n "$last_terminated" ]]
+}
+
+n8n_get_deployment_replicas() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+    local dep="$3"
+    KUBECONFIG="$kubeconfig_path" kubectl get deployment -n "$ns" "$dep" -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+}
+
+n8n_any_deployments_exist() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+    local count="0"
+    count=$(KUBECONFIG="$kubeconfig_path" kubectl get deployment -n "$ns" -l app=n8n --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    [[ "$count" -gt 0 ]]
+}
+
+ensure_n8n_deployments_scaled_up() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+
+    if ! n8n_any_deployments_exist "$kubeconfig_path" "$ns"; then
+        return 0
+    fi
+
+    local auto_scale="${N8N_AUTO_SCALE_UP_ON_ZERO:-true}"
+    if [[ "$auto_scale" != "true" ]]; then
+        return 0
+    fi
+
+    local main_replicas="${N8N_MAIN_REPLICAS:-1}"
+    local webhook_replicas="${N8N_WEBHOOK_REPLICAS:-1}"
+    local worker_replicas="${N8N_WORKER_REPLICAS:-1}"
+
+    local scaled_any="false"
+
+    local current=""
+    current=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-main")
+    if [[ "$current" == "0" ]] && [[ "$main_replicas" != "0" ]]; then
+        print_status "warn" "n8n-main replicas=0. Scaling up to $main_replicas..."
+        KUBECONFIG="$kubeconfig_path" kubectl scale deployment -n "$ns" n8n-main --replicas="$main_replicas" 2>&1 | tee -a "$LOG_FILE" || true
+        scaled_any="true"
+    fi
+
+    current=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-webhook")
+    if [[ "$current" == "0" ]] && [[ "$webhook_replicas" != "0" ]]; then
+        print_status "warn" "n8n-webhook replicas=0. Scaling up to $webhook_replicas..."
+        KUBECONFIG="$kubeconfig_path" kubectl scale deployment -n "$ns" n8n-webhook --replicas="$webhook_replicas" 2>&1 | tee -a "$LOG_FILE" || true
+        scaled_any="true"
+    fi
+
+    current=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-worker")
+    if [[ "$current" == "0" ]] && [[ "$worker_replicas" != "0" ]]; then
+        print_status "warn" "n8n-worker replicas=0. Scaling up to $worker_replicas..."
+        KUBECONFIG="$kubeconfig_path" kubectl scale deployment -n "$ns" n8n-worker --replicas="$worker_replicas" 2>&1 | tee -a "$LOG_FILE" || true
+        scaled_any="true"
+    fi
+
+    if [[ "$scaled_any" == "true" ]]; then
+        sleep 3
+    fi
+
+    return 0
+}
+
+wait_for_n8n_pods_ready() {
+    local kubeconfig_path="$1"
+    local ns="$2"
+    local timeout_seconds="$3"
+
+    local start_ts
+    start_ts=$(date +%s)
+    local poll_seconds="${N8N_WAIT_POLL_SECONDS:-10}"
+    local max_poll_seconds="${N8N_WAIT_MAX_POLL_SECONDS:-60}"
+    local no_pods_grace_seconds="${N8N_NO_PODS_GRACE_SECONDS:-120}"
+
+    while true; do
+        local now_ts
+        now_ts=$(date +%s)
+        local elapsed=$((now_ts - start_ts))
+        if [[ "$elapsed" -ge "$timeout_seconds" ]]; then
+            return 1
+        fi
+
+        local pod_lines=""
+        pod_lines=$(KUBECONFIG="$kubeconfig_path" kubectl get pods -n "$ns" -l app=n8n -o wide --no-headers 2>/dev/null || true)
+        if [[ -z "$pod_lines" ]]; then
+            if [[ "$elapsed" -ge "$no_pods_grace_seconds" ]]; then
+                if n8n_any_deployments_exist "$kubeconfig_path" "$ns"; then
+                    ensure_n8n_deployments_scaled_up "$kubeconfig_path" "$ns" || true
+                    local main_repl=""
+                    local webhook_repl=""
+                    local worker_repl=""
+                    main_repl=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-main")
+                    webhook_repl=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-webhook")
+                    worker_repl=$(n8n_get_deployment_replicas "$kubeconfig_path" "$ns" "n8n-worker")
+                    if [[ "$main_repl" == "0" ]] && [[ "$webhook_repl" == "0" ]] && [[ "$worker_repl" == "0" ]]; then
+                        return 1
+                    fi
+                else
+                    return 1
+                fi
+            fi
+            sleep "$poll_seconds"
+            continue
+        fi
+
+        local not_ready=""
+        not_ready=$(echo "$pod_lines" | pods_not_fully_ready_from_kubectl_get_noheaders | head -n 50 || true)
+        if [[ -z "$not_ready" ]]; then
+            return 0
+        fi
+
+        if ((elapsed % 60 == 0)); then
+            echo "$pod_lines" | tee -a "$LOG_FILE" >/dev/null || true
+        fi
+
+        sleep "$poll_seconds"
+        poll_seconds=$((poll_seconds * 3 / 2 ))
+        if [[ "$poll_seconds" -gt "$max_poll_seconds" ]]; then
+            poll_seconds="$max_poll_seconds"
+        fi
+    done
+}
+
+# Fungsi: Classify Terraform apply failure by log content
+classify_terraform_apply_failure() {
+    local log_file="$1"
+
+    if grep -q "timeout while waiting for state to become 'EXISTS'" "$log_file"; then
+        echo "volume_timeout"
+        return 0
+    fi
+
+    if grep -q "exists already" "$log_file" && grep -q "libvirt_cloudinit_disk" "$log_file"; then
+        echo "cloudinit_exists"
+        return 0
+    fi
+
+    if grep -q "Apply failed with 1 conflict" "$log_file" && grep -q "conflict" "$log_file"; then
+        echo "k8s_ssa_conflict"
+        return 0
+    fi
+
+    if grep -q "no domain with matching uuid" "$log_file" || grep -q "retrieving libvirt domain by delete" "$log_file"; then
+        echo "libvirt_domain_uuid_stale"
+        return 0
+    fi
+
+    if grep -q "already exists" "$log_file"; then
+        echo "resource_exists"
+        return 0
+    fi
+
+    echo "unknown"
     return 0
 }
 
@@ -918,7 +1497,19 @@ terraform_apply_with_retry() {
 
         if [[ $retry_count -gt 0 ]]; then
             print_status "info" "Recreating Terraform plan for retry..."
-            terraform plan \
+            local selected_kubeconfig
+            selected_kubeconfig=$(kubeconfig_selected_path || true)
+            if [[ -z "$selected_kubeconfig" ]] || [[ "$selected_kubeconfig" == "NOT_FOUND" ]]; then
+                selected_kubeconfig="${PROJECT_ROOT}/kubeconfig"
+            fi
+
+            local plan_refresh_arg=""
+            if ! kube_apiserver_ready "$selected_kubeconfig"; then
+                plan_refresh_arg="-refresh=false"
+                print_status "warn" "Kubernetes apiserver belum siap atau kubeconfig masih dummy. Menjalankan plan retry tanpa refresh."
+            fi
+
+            terraform plan $plan_refresh_arg \
                 -var-file="$VAR_FILE" \
                 -out="$PLAN_FILE" \
                 -input=false \
@@ -931,7 +1522,7 @@ terraform_apply_with_retry() {
         if terraform apply \
             -var-file="$VAR_FILE" \
             -auto-approve \
-            -parallelism=1 \
+            -parallelism="$TF_PARALLELISM" \
             "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"; then
             
             success=true
@@ -946,50 +1537,66 @@ terraform_apply_with_retry() {
             if [[ $retry_count -lt $max_retries ]]; then
                 print_status "info" "Analyzing failure and preparing retry..."
                 
-                # Check for specific errors
-                if grep -q "timeout while waiting for state to become 'EXISTS'" "$LOG_FILE"; then
-                    print_status "warn" "Detected volume creation timeout"
-                    print_status "info" "Cleaning up partial resources..."
-                    
-                    # Cleanup partial volumes
-                    cleanup_partial_volumes
-                    
-                    # Wait before retry
-                    local wait_time=$((retry_count * 30))
-                    print_status "info" "Waiting ${wait_time}s before retry..."
-                    sleep $wait_time
-                    
-                elif grep -q "exists already" "$LOG_FILE" && grep -q "libvirt_cloudinit_disk" "$LOG_FILE"; then
-                    print_status "warn" "Detected existing cloudinit volume conflict"
-                    print_status "info" "Attempting to remove conflicting cloudinit volumes..."
-                    
-                    # Extract volume name if possible, or run general cleanup
-                    local pool_name="k3s_infra_pool"
-                    # Try to find the specific volume name from the log
-                    local vol_name=$(grep -o "cloudinit-[a-zA-Z0-9-]*\.iso" "$LOG_FILE" | tail -1)
-                    
-                    if [[ -n "$vol_name" ]]; then
-                        print_status "info" "Removing specific volume: $vol_name"
-                        sudo virsh vol-delete "$vol_name" --pool "$pool_name" 2>/dev/null || true
-                    else
-                        print_status "info" "Could not extract volume name, running general cleanup..."
-                        cleanup_failed_resources
-                    fi
-                    
-                    print_status "info" "Refreshing pool..."
-                    sudo virsh pool-refresh "$pool_name" 2>/dev/null || true
+                local failure_kind=""
+                failure_kind=$(classify_terraform_apply_failure "$LOG_FILE")
 
-                elif grep -q "already exists" "$LOG_FILE"; then
-                    print_status "warn" "Detected resource conflict"
-                    print_status "info" "Attempting to import existing resources..."
-                    
-                    # Try to import existing resources
-                    import_existing_resources
-                    
-                else
-                    print_status "warn" "Unknown error, waiting before retry..."
-                    sleep 15
-                fi
+                case "$failure_kind" in
+                    volume_timeout)
+                        print_status "warn" "Detected volume creation timeout"
+                        print_status "info" "Cleaning up partial resources..."
+                        cleanup_partial_volumes
+
+                        local wait_time=$((retry_count * 30))
+                        print_status "info" "Waiting ${wait_time}s before retry..."
+                        sleep "$wait_time"
+                        ;;
+
+                    cloudinit_exists)
+                        print_status "warn" "Detected existing cloudinit volume conflict"
+                        print_status "info" "Attempting to remove conflicting cloudinit volumes..."
+
+                        local pool_name="k3s_infra_pool"
+                        local vol_name=""
+                        vol_name=$(grep -o "cloudinit-[a-zA-Z0-9-]*\.iso" "$LOG_FILE" | tail -1 || true)
+
+                        if [[ -n "$vol_name" ]]; then
+                            print_status "info" "Removing specific volume: $vol_name"
+                            sudo virsh vol-delete "$vol_name" --pool "$pool_name" 2>/dev/null || true
+                        else
+                            print_status "info" "Could not extract volume name, running general cleanup..."
+                            cleanup_failed_resources
+                        fi
+
+                        print_status "info" "Refreshing pool..."
+                        sudo virsh pool-refresh "$pool_name" 2>/dev/null || true
+                        ;;
+
+                    k8s_ssa_conflict)
+                        print_status "warn" "Detected Kubernetes Server-Side Apply conflict"
+                        print_status "info" "This usually means a field is managed by another controller (e.g., kubectl-set)."
+                        print_status "info" "Use 'force_conflicts = true' in kubectl_manifest to make Terraform the manager."
+                        sleep 5
+                        ;;
+
+                    resource_exists)
+                        print_status "warn" "Detected resource conflict"
+                        print_status "info" "Attempting to import existing resources..."
+                        import_existing_resources
+                        ;;
+
+                    libvirt_domain_uuid_stale)
+                        print_status "warn" "Detected stale libvirt domain UUID in Terraform state"
+                        print_status "info" "Reconciling domain drift and preparing retry..."
+                        reconcile_libvirt_domain_state
+                        reconcile_libvirt_state
+                        sleep 10
+                        ;;
+
+                    *)
+                        print_status "warn" "Unknown error, waiting before retry..."
+                        sleep 15
+                        ;;
+                esac
                 
                 if grep -q "Saved plan is stale" "$LOG_FILE"; then
                     print_status "warn" "Saved plan is stale. A new plan will be generated on the next retry."
@@ -1215,6 +1822,11 @@ backup_terraform_state() {
 # Fungsi: Check for Updates
 check_for_updates() {
     print_status "info" "Checking for script updates..."
+
+    if [[ "${SKIP_UPDATE_CHECK:-false}" == "true" ]] || [[ "${DRY_RUN:-false}" == "true" ]]; then
+        print_status "info" "Skipping update check"
+        return 0
+    fi
     
     # Check if we're in a git repository
     if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -1222,7 +1834,7 @@ check_for_updates() {
         print_status "info" "Current branch: $current_branch"
         
         # Fetch latest changes (without pulling)
-        if git fetch origin &>/dev/null; then
+        if GIT_SSH_COMMAND="ssh -o BatchMode=yes" git fetch origin &>/dev/null; then
             local behind_count=$(git rev-list HEAD..origin/$current_branch --count 2>/dev/null || echo "0")
             if [[ $behind_count -gt 0 ]]; then
                 print_status "warn" "Script is $behind_count commit(s) behind origin"
@@ -1282,6 +1894,16 @@ validate_environment() {
             print_status "info" "  $var = $var_value"
         done
     fi
+
+    local tf_log_path="${TF_LOG_PATH:-}"
+    if [[ -n "$tf_log_path" ]]; then
+        local tf_log_dir=""
+        tf_log_dir="$(dirname "$tf_log_path")"
+        if [[ ! -d "$tf_log_dir" ]] || [[ ! -w "$tf_log_dir" ]] || { [[ -e "$tf_log_path" ]] && [[ ! -w "$tf_log_path" ]]; }; then
+            print_status "warn" "TF_LOG_PATH points to a non-writable location. Unsetting to prevent Terraform failures."
+            unset TF_LOG_PATH
+        fi
+    fi
 }
 
 # Fungsi: Ensure Dummy Kubeconfig Exists
@@ -1327,6 +1949,80 @@ EOF
     fi
 }
 
+kubeconfig_selected_path() {
+    local output=""
+    output=$(bash "${PROJECT_ROOT}/scripts/get_kubeconfig.sh" 2>/dev/null || true)
+    echo "$output" | sed -n 's/.*"kube_config_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+kubeconfig_server_url() {
+    local kube_path="$1"
+    grep -m1 -E '^[[:space:]]*server:' "$kube_path" 2>/dev/null | awk '{print $2}' | head -n 1 || true
+}
+
+kubeconfig_is_dummy() {
+    local kube_path="$1"
+    local server_url=""
+    server_url=$(kubeconfig_server_url "$kube_path" || true)
+    [[ "$server_url" == "https://127.0.0.1:6443" ]]
+}
+
+kube_apiserver_ready() {
+    local kube_path="$1"
+    if [[ -z "$kube_path" ]] || [[ ! -f "$kube_path" ]]; then
+        return 1
+    fi
+    if kubeconfig_is_dummy "$kube_path"; then
+        return 1
+    fi
+    if ! command -v kubectl >/dev/null 2>&1; then
+        return 1
+    fi
+    KUBECONFIG="$kube_path" kubectl --request-timeout=5s get --raw='/readyz' >/dev/null 2>&1
+}
+
+# Fungsi: Cleanup Stuck n8n Pods (Terminating State)
+cleanup_stuck_n8n_pods() {
+    print_status "info" "Checking for stuck Terminating pods in n8n namespace..."
+    
+    local selected_kubeconfig
+    selected_kubeconfig=$(kubeconfig_selected_path || true)
+    if [[ -z "$selected_kubeconfig" ]] || [[ "$selected_kubeconfig" == "NOT_FOUND" ]]; then
+        # Fallback if not found, though likely won't work if no kubeconfig
+        return 0
+    fi
+
+    if ! command -v kubectl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local ns="n8n"
+    # Find pods that are in Terminating state
+    local stuck_pods
+    stuck_pods=$(KUBECONFIG="$selected_kubeconfig" kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep "Terminating" | awk '{print $1}' || true)
+
+    if [[ -n "$stuck_pods" ]]; then
+        print_status "warn" "Found stuck Terminating pods: $stuck_pods"
+        
+        for pod in $stuck_pods; do
+            print_status "info" "Force deleting stuck pod: $pod"
+            # Try force delete with 0 grace period
+            KUBECONFIG="$selected_kubeconfig" kubectl delete pod "$pod" -n "$ns" --grace-period=0 --force 2>&1 | tee -a "$LOG_FILE" || true
+            
+            # Check if still exists after a moment
+            sleep 2
+            if KUBECONFIG="$selected_kubeconfig" kubectl get pod "$pod" -n "$ns" >/dev/null 2>&1; then
+                print_status "warn" "Pod $pod still exists after force delete. Patching finalizers..."
+                # Patch finalizers to null to allow deletion
+                KUBECONFIG="$selected_kubeconfig" kubectl patch pod "$pod" -n "$ns" -p '{"metadata":{"finalizers":null}}' 2>&1 | tee -a "$LOG_FILE" || true
+            fi
+        done
+        print_status "success" "Cleanup of stuck pods completed"
+    else
+        print_status "info" "No stuck Terminating pods found"
+    fi
+}
+
 # Fungsi: Enhanced Main Execution Flow
 main() {
     clear
@@ -1345,6 +2041,8 @@ main() {
 
     # Ensure dummy kubeconfig exists for Terraform providers
     ensure_dummy_kubeconfig
+
+    print_status "info" "Terraform apply parallelism: $TF_PARALLELISM"
     
     cd "$PROJECT_ROOT" || {
         print_status "error" "Failed to change to project root: $PROJECT_ROOT"
@@ -1358,10 +2056,14 @@ main() {
     print_status "step" "Running comprehensive pre-flight checks..."
     if ! comprehensive_preflight_checks; then
         print_status "error" "Pre-flight checks failed"
-        read -p "Continue anyway? (yes/no): " -r
-        if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-            print_status "info" "Deployment cancelled by user"
-            exit 1
+        if [[ "${FORCE_MODE:-false}" == "true" ]] || [[ "${DRY_RUN:-false}" == "true" ]]; then
+            print_status "warn" "Continuing despite failed pre-flight checks due to --force/--dry-run"
+        else
+            read -p "Continue anyway? (yes/no): " -r
+            if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+                print_status "info" "Deployment cancelled by user"
+                exit 1
+            fi
         fi
     fi
     
@@ -1397,11 +2099,26 @@ main() {
     reconcile_libvirt_state
     reconcile_libvirt_domain_state
     
+    # Cleanup stuck pods before planning to avoid state conflicts
+    cleanup_stuck_n8n_pods
+
     # Step 3: Terraform Plan
     step_start=$(date +%s)
     print_status "step" "Membuat Rencana Perubahan (Plan)..."
-    
-    if terraform plan -var-file="$VAR_FILE" -out="$PLAN_FILE" -input=false -compact-warnings >> "$LOG_FILE" 2>&1; then
+
+    local selected_kubeconfig
+    selected_kubeconfig=$(kubeconfig_selected_path || true)
+    if [[ -z "$selected_kubeconfig" ]] || [[ "$selected_kubeconfig" == "NOT_FOUND" ]]; then
+        selected_kubeconfig="${PROJECT_ROOT}/kubeconfig"
+    fi
+
+    local plan_refresh_arg=""
+    if ! kube_apiserver_ready "$selected_kubeconfig"; then
+        plan_refresh_arg="-refresh=false"
+        print_status "warn" "Kubernetes apiserver belum siap atau kubeconfig masih dummy. Menjalankan plan tanpa refresh."
+    fi
+
+    if terraform plan $plan_refresh_arg -var-file="$VAR_FILE" -out="$PLAN_FILE" -input=false -compact-warnings >> "$LOG_FILE" 2>&1; then
         print_status "success" "Plan created successfully"
         
         # Display plan summary
@@ -1412,20 +2129,51 @@ main() {
             echo "$plan_summary" >> "$LOG_FILE"
         fi
         
-        # Ask for confirmation
-        echo ""
-        read -p "Proceed with apply? (yes/no): " -r
-        if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-            print_status "info" "Deployment cancelled by user"
-            rm -f "$PLAN_FILE"
-            exit 0
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            print_status "success" "Dry-run mode enabled. Skipping apply."
+        elif [[ "${FORCE_MODE:-false}" == "true" ]]; then
+            print_status "warn" "--force enabled. Proceeding to apply without prompt."
+        else
+            echo ""
+            read -p "Proceed with apply? (yes/no): " -r
+            if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+                print_status "info" "Deployment cancelled by user"
+                rm -f "$PLAN_FILE"
+                exit 0
+            fi
         fi
     else
-        handle_error $? "Terraform Plan"
+        if tail -n 300 "$LOG_FILE" | grep -q "apiserver not ready"; then
+            print_status "warn" "Terraform plan gagal karena apiserver belum siap. Mencoba ulang plan tanpa refresh..."
+            if terraform plan -refresh=false -var-file="$VAR_FILE" -out="$PLAN_FILE" -input=false -compact-warnings >> "$LOG_FILE" 2>&1; then
+                print_status "success" "Plan created successfully (no refresh)"
+            else
+                handle_error $? "Terraform Plan"
+            fi
+        elif tail -n 300 "$LOG_FILE" | grep -q "no domain with matching uuid" || tail -n 300 "$LOG_FILE" | grep -q "retrieving libvirt domain by delete"; then
+            print_status "warn" "Terraform plan gagal karena state libvirt domain tidak sinkron. Melakukan rekonsiliasi state dan retry plan..."
+            reconcile_libvirt_domain_state
+            if terraform plan $plan_refresh_arg -var-file="$VAR_FILE" -out="$PLAN_FILE" -input=false -compact-warnings >> "$LOG_FILE" 2>&1; then
+                print_status "success" "Plan created successfully after libvirt reconciliation"
+            else
+                handle_error $? "Terraform Plan"
+            fi
+        else
+            handle_error $? "Terraform Plan"
+        fi
     fi
     
     step_end=$(date +%s)
     echo "Step 3 (Plan) took $((step_end - step_start))s" >> "$LOG_FILE"
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        print_status "step" "Dry-run Summary..."
+        terraform show -no-color "$PLAN_FILE" 2>/dev/null | sed -n '1,120p' | tee -a "$LOG_FILE" || true
+        generate_deployment_report || true
+        rm -f "$PLAN_FILE" || true
+        print_status "success" "Dry-run completed"
+        exit 0
+    fi
     
     # Step 4: Terraform Apply (with retry)
     step_start=$(date +%s)
@@ -1456,8 +2204,10 @@ main() {
     if post_deployment_verification; then
         print_status "success" "Post-deployment verification passed"
     else
-        print_status "warn" "Some post-deployment checks failed (non-critical)"
+        handle_error 1 "Post-deployment Verification"
     fi
+
+    validate_ssh_authentication
     
     step_end=$(date +%s)
     echo "Step 5 (Post-verification) took $((step_end - step_start))s" >> "$LOG_FILE"
@@ -1529,10 +2279,11 @@ main() {
     # Offer next steps
     echo ""
     echo -e "${CYAN}Next Steps:${NC}"
-    echo "  1. Verify VM connectivity: ssh -i <key> ubuntu@<vm-ip>"
-    echo "  2. Check VM status: sudo virsh list --all"
-    echo "  3. View deployment report: cat ${LOG_DIR}/deployment-report-${TIMESTAMP}.txt"
-    echo "  4. Access troubleshooting menu: $0 --troubleshoot"
+    echo "  1. Validate SSH (auto-fix known_hosts): bash ./scripts/validate_ssh_auth.sh --fix-known-hosts"
+    echo "  2. Verify VM connectivity (manual): ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null qbig_user@<vm-ip>"
+    echo "  3. Check VM status: sudo virsh list --all"
+    echo "  4. View deployment report: cat ${LOG_DIR}/deployment-report-${TIMESTAMP}.txt"
+    echo "  5. Access troubleshooting menu: $0 --troubleshoot"
     echo ""
     
     print_status "success" "Log lengkap tersedia di: $LOG_FILE"
@@ -1598,6 +2349,7 @@ ${WHITE}Options:${NC}
   ${GREEN}--report, -r${NC}            Generate deployment report
   ${GREEN}--cleanup, -c${NC}           Cleanup failed resources
   ${GREEN}--deep-clean${NC}            Deep clean storage pool (DESTRUCTIVE)
+  ${GREEN}--dry-run${NC}               Run init/validate/plan only (no apply)
   ${GREEN}--no-backup${NC}             Skip state backup
   ${GREEN}--force${NC}                 Skip confirmation prompts
 
@@ -1636,6 +2388,7 @@ EOF
 parse_arguments() {
     local skip_backup=false
     local force_mode=false
+    local dry_run=false
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -1674,13 +2427,14 @@ parse_arguments() {
                 deep_clean_storage
                 exit 0
                 ;;
+            --dry-run)
+                dry_run=true
+                ;;
             --no-backup)
                 skip_backup=true
-                shift
                 ;;
             --force)
                 force_mode=true
-                shift
                 ;;
             *)
                 print_status "error" "Unknown option: $1"
@@ -1694,6 +2448,7 @@ parse_arguments() {
     # Export flags for use in main
     export SKIP_BACKUP=$skip_backup
     export FORCE_MODE=$force_mode
+    export DRY_RUN=$dry_run
 }
 
 # Fungsi: Fix VM Network Issues (New)
@@ -1822,18 +2577,13 @@ cleanup_on_interrupt() {
     exit 130
 }
 
-# Fungsi: Trap Signals
-trap cleanup_on_interrupt SIGINT SIGTERM
-
 # ============================================================================
 # Script Entry Point
 # ============================================================================
 
-# Parse command line arguments
-parse_arguments "$@"
-
-# Run main deployment
-main
-
-# Exit with success
-exit 0
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    trap cleanup_on_interrupt SIGINT SIGTERM
+    parse_arguments "$@"
+    main
+    exit 0
+fi
