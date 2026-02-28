@@ -29,6 +29,61 @@ Sebelum memulai, pastikan sistem host Anda memenuhi kriteria berikut:
 - **RAM**: Minimal 4GB free.
 - **Storage Pool**: Storage pool libvirt harus terdefinisi dan aktif (default: `k3s_infra_pool` di `/var/lib/libvirt/images/k3s_infra_pool`).
 - **User**: Akses sudo dan masuk ke grup `libvirt` serta `kvm`.
+- **ISO Tooling**: `mkisofs` (atau `genisoimage` + symlink `mkisofs`) untuk membuat Cloud-Init ISO.
+
+## 📀 Dependency Cloud-Init ISO (mkisofs)
+
+Resource `libvirt_cloudinit_disk` membutuhkan executable `mkisofs` untuk membangun ISO seed Cloud-Init.
+
+### Ubuntu/Debian
+```bash
+sudo apt-get update
+sudo apt-get install -y genisoimage
+command -v mkisofs >/dev/null 2>&1 || sudo ln -sf /usr/bin/genisoimage /usr/local/bin/mkisofs
+mkisofs --version
+```
+
+### RHEL/CentOS/Rocky/Fedora
+```bash
+sudo dnf install -y genisoimage || sudo yum install -y genisoimage
+command -v mkisofs >/dev/null 2>&1 || sudo ln -sf "$(command -v genisoimage)" /usr/local/bin/mkisofs
+mkisofs --version
+```
+
+### Alpine
+```bash
+sudo apk add --no-cache cdrkit
+command -v mkisofs >/dev/null 2>&1 || sudo ln -sf "$(command -v genisoimage)" /usr/local/bin/mkisofs
+mkisofs --version
+```
+
+## 🔐 Permission & AppArmor (Disk Image)
+
+Jika `qemu-system-x86_64` gagal membuka file qcow2 dengan `Permission denied` saat membuat `libvirt_domain`, penyebab paling umum di Ubuntu adalah mismatch AppArmor rule generator (`virt-aa-helper`) dengan template profile libvirt yang memakai include `*.files`.
+
+### Validasi cepat
+```bash
+namei -l /var/lib/libvirt/images/k3s_infra_pool/ubuntu-base-img-k3s-master-01.qcow2
+ls -ld /var/lib/libvirt/images /var/lib/libvirt/images/k3s_infra_pool
+aa-status | head -n 60
+```
+
+### Perbaikan AppArmor (best practice)
+Gunakan local override (aman untuk update package):
+```bash
+sudo mkdir -p /etc/apparmor.d/local
+echo '/etc/apparmor.d/libvirt/libvirt-*.files rw,' | sudo tee -a /etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper
+sudo apparmor_parser -r /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper
+```
+
+### Permission hardening untuk pool
+Pastikan file image dimiliki user QEMU libvirt dan tidak world-writable:
+```bash
+sudo chown -R libvirt-qemu:kvm /var/lib/libvirt/images/k3s_infra_pool
+sudo find /var/lib/libvirt/images/k3s_infra_pool -type d -exec chmod 0755 {} \;
+sudo find /var/lib/libvirt/images/k3s_infra_pool -type f -name '*.qcow2' -exec chmod 0640 {} \;
+sudo find /var/lib/libvirt/images/k3s_infra_pool -type f -name '*.iso' -exec chmod 0640 {} \;
+```
 
 ## 🚀 Panduan Instalasi Cepat
 

@@ -57,6 +57,23 @@ assert_eq "cloudinit_exists" "$(classify_terraform_apply_failure "$tmp")" "class
 rm -f "$tmp"
 
 tmp="$(make_tmpfile)"
+printf "%s\n" "Error: error while starting the creation of CloudInit's ISO image: exec: \"mkisofs\": executable file not found in \$PATH" >"$tmp"
+assert_eq "mkisofs_missing" "$(classify_terraform_apply_failure "$tmp")" "classify_mkisofs_missing"
+rm -f "$tmp"
+
+tmp="$(make_tmpfile)"
+cat >"$tmp" <<'EOF'
+qemu-system-x86_64: -blockdev {"driver":"file","filename":"/var/lib/libvirt/images/k3s_infra_pool/ubuntu-base-img-k3s-master-01.qcow2"}: Could not open '/var/lib/libvirt/images/k3s_infra_pool/ubuntu-base-img-k3s-master-01.qcow2': Permission denied
+EOF
+assert_eq "libvirt_image_permission_denied" "$(classify_terraform_apply_failure "$tmp")" "classify_libvirt_image_permission_denied"
+rm -f "$tmp"
+
+tmp="$(make_tmpfile)"
+printf "%s\n" "Error: error defining libvirt domain: operation failed: domain 'k3s-master-01' already exists with uuid 488e498a" >"$tmp"
+assert_eq "libvirt_domain_exists" "$(classify_terraform_apply_failure "$tmp")" "classify_libvirt_domain_exists"
+rm -f "$tmp"
+
+tmp="$(make_tmpfile)"
 printf "%s\n" "Apply failed with 1 conflict: conflict with \"kubectl-set\" using apps/v1" >"$tmp"
 assert_eq "k8s_ssa_conflict" "$(classify_terraform_apply_failure "$tmp")" "classify_k8s_ssa_conflict"
 rm -f "$tmp"

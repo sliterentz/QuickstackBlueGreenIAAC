@@ -64,3 +64,7 @@ workflows/
 - [ ] Ganti default password database di `.env`.
 - [ ] Pastikan port 5678/6379 tidak terekspos ke publik (gunakan firewall/security group).
 - [ ] Setup SSL/TLS yang valid (LetsEncrypt via Certbot atau Cloudflare).
+
+## 🧱 Catatan IaC (Terraform + Libvirt)
+
+Jika menjalankan deployment KVM/Libvirt via `scripts/deploy_optimized.sh`, host membutuhkan tooling ISO `mkisofs` (atau `genisoimage` + symlink `mkisofs`) untuk resource `libvirt_cloudinit_disk`. Detail prasyarat ada di `terraform-kvm-ubuntu/README.md`.

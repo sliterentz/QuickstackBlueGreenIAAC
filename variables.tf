@@ -382,6 +382,17 @@ variable "libvirt_pool_path" {
   default     = "/var/lib/libvirt/images"
 }
 
+variable "libvirt_uri" {
+  description = "Libvirt connection URI (contoh: qemu:///system atau qemu+ssh://user@host/system)"
+  type        = string
+  default     = "qemu:///system"
+
+  validation {
+    condition     = can(regex("^qemu(\\+ssh)?://", var.libvirt_uri))
+    error_message = "libvirt_uri harus berupa URI yang diawali dengan qemu:/// atau qemu+ssh://"
+  }
+}
+
 variable "libvirt_domain_type" {
   description = "Domain type for libvirt (kvm or qemu). Use 'qemu' if nested virtualization is not available."
   type        = string

@@ -19,6 +19,7 @@ override.tf.json
 terraform.rc
 crash.log
 crash.*.log
+.terraform.d/*
 
 # Kubernetes files
 kubeconfig
@@ -57,3 +58,5 @@ logs/
 *.swp
 *.swo
 *~
+
+docs/*

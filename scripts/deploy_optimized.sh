@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 # Ini mencegah error "unbound variable" sebelum fungsi validate_environment dipanggil
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
@@ -48,6 +50,11 @@ declare -A STEP_WEIGHTS=(
 TOTAL_WEIGHT=91
 
 TF_PARALLELISM="${TF_PARALLELISM:-1}"
+TF_INIT_RETRIES="${TF_INIT_RETRIES:-3}"
+TF_INIT_UPGRADE="${TF_INIT_UPGRADE:-false}"
+TF_REGISTRY_CLIENT_TIMEOUT="${TF_REGISTRY_CLIENT_TIMEOUT:-120}"
+TF_PROVIDER_NET_RETRIES="${TF_PROVIDER_NET_RETRIES:-3}"
+TF_PROVIDER_NET_TIMEOUT_SECONDS="${TF_PROVIDER_NET_TIMEOUT_SECONDS:-15}"
 
 # Fungsi: Gambar Progress Bar
 draw_progress_bar() {
@@ -95,6 +102,34 @@ print_status() {
             echo -e "\n${CYAN}[$timestamp STEP $CURRENT_STEP/$TOTAL_STEPS]${NC} ${WHITE}$message${NC}"
             ;;
     esac
+}
+
+libvirt_uri_is_remote() {
+    local uri="${LIBVIRT_DEFAULT_URI:-}"
+    [[ "$uri" == *"+ssh://"* || "$uri" == *"+tcp://"* || "$uri" == *"+tls://"* || "$uri" == ssh://* || "$uri" == tcp://* || "$uri" == tls://* ]]
+}
+
+sudo_noninteractive_ok() {
+    command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+}
+
+run_virsh() {
+    local rc=0
+    if virsh -c "${LIBVIRT_DEFAULT_URI}" "$@"; then
+        return 0
+    fi
+    rc=$?
+
+    if libvirt_uri_is_remote; then
+        return "$rc"
+    fi
+
+    if sudo_noninteractive_ok; then
+        sudo virsh -c "${LIBVIRT_DEFAULT_URI}" "$@"
+        return $?
+    fi
+
+    return "$rc"
 }
 
 SUDO_CHECK_OUTPUT=""
@@ -175,6 +210,44 @@ verify_libvirt_pool() {
             print_status "error" "Failed to start storage pool"
             handle_error 1 "Start Storage Pool"
         }
+    fi
+    
+    if ! libvirt_uri_is_remote; then
+        # Deteksi QEMU user
+        local qemu_user=$(detect_qemu_user)
+        local qemu_group=$(detect_qemu_group)
+        
+        print_status "info" "Detected QEMU runtime: $qemu_user:$qemu_group"
+        
+        if [[ ! -d "$pool_path" ]]; then
+            print_status "warn" "Pool path does not exist: $pool_path"
+            print_status "info" "Creating pool path..."
+            sudo mkdir -p "$pool_path"
+        fi
+
+        # Set correct ownership based on detected user
+        print_status "info" "Setting ownership to $qemu_user:$qemu_group..."
+        
+        if [[ "$qemu_user" == "root" ]]; then
+            sudo chown -R root:root "$pool_path"
+            sudo chmod 755 "$pool_path"
+            print_status "info" "✓ Pool configured for root execution"
+        else
+            sudo chown -R "$qemu_user:$qemu_group" "$pool_path"
+            sudo chmod 755 "$pool_path"
+            print_status "info" "✓ Pool configured for unprivileged execution"
+        fi
+        
+        # Verify ownership
+        local actual_owner=$(stat -c '%U:%G' "$pool_path" 2>/dev/null)
+        print_status "info" "Pool path owner: $actual_owner"
+        
+        if [[ "$actual_owner" != "$qemu_user:$qemu_group" ]]; then
+            print_status "error" "Ownership mismatch! Expected: $qemu_user:$qemu_group, Got: $actual_owner"
+            handle_error 1 "Pool Ownership"
+        fi
+    else
+        print_status "info" "Remote libvirt URI detected, skipping local path checks"
     fi
     
     if [[ ! -d "$pool_path" ]]; then
@@ -293,18 +366,80 @@ ensure_pool_ready_for_volumes() {
     print_status "success" "Storage pool is active"
     
     # 2. Verify pool path permissions
-    print_status "info" "Verifying pool path permissions..."
-    if [[ ! -d "$pool_path" ]]; then
-        print_status "warn" "Pool path doesn't exist, creating..."
-        sudo mkdir -p "$pool_path" || return 1
+    if ! libvirt_uri_is_remote; then
+        print_status "info" "Verifying pool path permissions..."
+        
+        # Deteksi QEMU user dan group
+        local qemu_user=$(detect_qemu_user)
+        local qemu_group=$(detect_qemu_group)
+        
+        print_status "info" "QEMU akan berjalan sebagai: $qemu_user:$qemu_group"
+        
+        if [[ ! -d "$pool_path" ]]; then
+            print_status "warn" "Pool path doesn't exist, creating..."
+            sudo mkdir -p "$pool_path" || return 1
+        fi
+
+        # Set ownership ke QEMU user (bukan current user)
+        print_status "info" "Setting ownership ke $qemu_user:$qemu_group..."
+        if [[ "$qemu_user" == "root" ]]; then
+            sudo chown -R root:root "$pool_path" || {
+                print_status "error" "Gagal set ownership ke root:root"
+                return 1
+            }
+            sudo chmod 755 "$pool_path" || return 1
+            print_status "info" "✓ Pool owned by root (libvirt running as root)"
+        else
+            sudo chown -R "$qemu_user:$qemu_group" "$pool_path" || {
+                print_status "error" "Gagal set ownership ke $qemu_user:$qemu_group"
+                return 1
+            }
+            sudo chmod 755 "$pool_path" || return 1
+            print_status "info" "✓ Pool owned by $qemu_user:$qemu_group"
+        fi
+
+        # Verify ownership
+        local actual_owner=$(stat -c '%U:%G' "$pool_path" 2>/dev/null)
+        local expected_owner="$qemu_user:$qemu_group"
+
+        if [[ "$actual_owner" == "$expected_owner" ]]; then
+            print_status "success" "✓ Ownership correct: $actual_owner"
+        else
+            print_status "error" "✗ Ownership mismatch: $actual_owner (expected: $expected_owner)"
+            return 1
+        fi
+        
+        # Test write access sebagai QEMU user (bukan current user)
+        print_status "info" "Testing write permissions untuk QEMU user..."
+        local test_file="${pool_path}/.test_write_$$"
+        
+        if [[ "$qemu_user" == "root" ]]; then
+            # Jika root, langsung test dengan sudo
+            if sudo touch "$test_file" 2>/dev/null; then
+                sudo rm -f "$test_file"
+                print_status "success" "✓ Root dapat menulis ke pool"
+            else
+                print_status "error" "✗ Root tidak dapat menulis ke pool"
+                return 1
+            fi
+        else
+            # Jika unprivileged user, test dengan sudo -u
+            if sudo -u "$qemu_user" touch "$test_file" 2>/dev/null; then
+                sudo rm -f "$test_file"
+                print_status "success" "✓ QEMU user ($qemu_user) dapat menulis ke pool"
+            else
+                print_status "error" "✗ QEMU user ($qemu_user) tidak dapat menulis ke pool"
+                
+                # Debug info
+                print_status "info" "Debug - Directory permissions:"
+                ls -lad "$pool_path" | tee -a "$LOG_FILE"
+                
+                return 1
+            fi
+        fi
+    else
+        print_status "info" "Libvirt URI remote terdeteksi. Melewati perbaikan permission path lokal: $pool_path"
     fi
-    
-    # Set proper permissions for libvirt
-    sudo chown -R libvirt-qemu:kvm "$pool_path" 2>/dev/null || \
-    sudo chown -R qemu:kvm "$pool_path" 2>/dev/null || \
-    print_status "warn" "Could not set ownership (may not be critical)"
-    
-    sudo chmod 755 "$pool_path" || return 1
     
     # 3. Verify pool has available space
     local available_space
@@ -372,6 +507,280 @@ precreate_base_image_volume() {
     return 0
 }
 
+# Fungsi helper untuk deteksi QEMU user
+detect_qemu_user() {
+    local qemu_user=""
+    
+    # 1. Cek dari proses QEMU yang sedang berjalan
+    if pgrep -x qemu-system-x86 >/dev/null 2>&1; then
+        qemu_user=$(ps aux | grep -E '[q]emu-system-x86' | head -1 | awk '{print $1}')
+        if [[ -n "$qemu_user" ]]; then
+            echo "$qemu_user"
+            return 0
+        fi
+    fi
+    
+    # 2. Cek dari konfigurasi libvirt qemu.conf
+    if [[ -f /etc/libvirt/qemu.conf ]]; then
+        # Try reading with sudo
+        local conf_user=""
+        if sudo_noninteractive_ok; then
+            conf_user=$(sudo grep -E '^\s*user\s*=' /etc/libvirt/qemu.conf 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | tr -d ' "')
+        elif [[ -r /etc/libvirt/qemu.conf ]]; then
+            # Fallback to direct read if file is readable
+            conf_user=$(grep -E '^\s*user\s*=' /etc/libvirt/qemu.conf 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | tr -d ' "')
+        fi
+
+        # Jika user = "root" atau tidak di-set (commented), maka libvirt berjalan sebagai root
+        if [[ -n "$conf_user" ]] && [[ "$conf_user" != "root" ]]; then
+            echo "$conf_user"
+            return 0
+        fi
+    fi
+        
+    # 3. Cek dari proses libvirtd
+    if pgrep -x libvirtd >/dev/null 2>&1; then
+        local libvirt_user=$(ps aux | grep -E '[l]ibvirtd' | head -1 | awk '{print $1}')
+        if [[ "$libvirt_user" == "root" ]]; then
+            # Libvirt berjalan sebagai root, maka QEMU juga akan berjalan sebagai root
+            echo "root"
+            return 0
+        fi
+    fi
+
+    # 4. Check from virtqemud process (newer libvirt)
+    if pgrep -x virtqemud >/dev/null 2>&1; then
+        local virtqemu_user=$(ps aux | grep -E '[v]irtqemud' | head -1 | awk '{print $1}')
+        if [[ -n "$virtqemu_user" ]]; then
+            echo "$virtqemu_user"
+            return 0
+        fi
+    fi
+
+    # 5. Fallback ke user default berdasarkan distro
+    if [[ -z "$qemu_user" ]]; then
+        if id libvirt-qemu >/dev/null 2>&1; then
+            qemu_user="libvirt-qemu"
+        elif id qemu >/dev/null 2>&1; then
+            qemu_user="qemu"
+        else
+            qemu_user="root"
+        fi
+    fi
+    
+    echo "$qemu_user"
+}
+
+detect_qemu_group() {
+    local qemu_group=""
+    local qemu_user=$(detect_qemu_user)
+    
+    # Jika QEMU user adalah root, group juga root
+    if [[ "$qemu_user" == "root" ]]; then
+        echo "root"
+        return 0
+    fi
+    
+    # Cek dari konfigurasi libvirt
+    if [[ -f /etc/libvirt/qemu.conf ]]; then
+        qemu_group=$(grep -E '^\s*group\s*=' /etc/libvirt/qemu.conf | sed 's/.*=\s*"\(.*\)"/\1/' | tr -d ' "')
+        if [[ -n "$qemu_group" ]] && [[ "$qemu_group" != "root" ]]; then
+            echo "$qemu_group"
+            return 0
+        fi
+    fi
+    
+    # Fallback ke group default
+    if [[ -z "$qemu_group" ]]; then
+        if getent group kvm >/dev/null 2>&1; then
+            qemu_group="kvm"
+        elif getent group libvirt >/dev/null 2>&1; then
+            qemu_group="libvirt"
+        else
+            qemu_group="root"
+        fi
+    fi
+    
+    echo "$qemu_group"
+}
+
+# Fungsi: Fix Volume Permissions
+fix_volume_permissions() {
+    print_status "info" "Memperbaiki permissions untuk volume yang ada..."
+    
+    local pool_name="k3s_infra_pool"
+    local pool_path="/var/lib/libvirt/images/${pool_name}"
+    
+    if libvirt_uri_is_remote; then
+        print_status "info" "Libvirt URI remote terdeteksi. Melewati perbaikan permission lokal."
+        return 0
+    fi
+
+    # Deteksi user dan group qemu
+    local qemu_user=$(detect_qemu_user)
+    local qemu_group=$(detect_qemu_group)
+
+    print_status "info" "QEMU User: $qemu_user, Group: $qemu_group"
+    
+    # Pastikan direktori pool ada
+    if [[ ! -d "$pool_path" ]]; then
+        print_status "info" "Membuat direktori pool: $pool_path"
+        sudo mkdir -p "$pool_path"
+    fi
+
+    if ! ensure_sudo_ready; then
+        print_status "error" "Tidak dapat menjalankan sudo untuk memperbaiki permission pool."
+        return 1
+    fi
+
+    sudo chown root:root /var/lib/libvirt >>"$LOG_FILE" 2>&1 || true
+    sudo chown root:root /var/lib/libvirt/images >>"$LOG_FILE" 2>&1 || true
+    sudo chmod 0711 /var/lib/libvirt >>"$LOG_FILE" 2>&1 || true
+    sudo chmod 0711 /var/lib/libvirt/images >>"$LOG_FILE" 2>&1 || true
+
+    {
+        echo "Libvirt pool permission audit (before fix):"
+        echo "- pool_path: $pool_path"
+        stat -c "  %A %a %U:%G %n" /var/lib/libvirt /var/lib/libvirt/images "$pool_path" 2>/dev/null || true
+        sudo find "$pool_path" -maxdepth 1 -type f \( -name '*.qcow2' -o -name '*.iso' \) -printf "  %M %m %u:%g %p\n" 2>/dev/null | head -n 40 || true
+    } >>"$LOG_FILE" 2>&1
+
+    # Fix ownership direktori pool
+    print_status "info" "Memperbaiki ownership direktori pool..."
+
+    if [[ "$qemu_user" == "root" ]]; then
+        # Jika QEMU berjalan sebagai root, set ownership ke root:root
+        sudo chown -R root:root "$pool_path" || {
+            print_status "error" "Gagal set ownership ke root:root"
+            return 1
+        }
+        # Set permissions yang lebih permissive untuk root
+        sudo chmod 0755 "$pool_path"
+        
+        print_status "info" "✓ Ownership set to root:root (libvirt running as root)"
+    else
+        # Jika QEMU berjalan sebagai unprivileged user
+        sudo chown -R "$qemu_user:$qemu_group" "$pool_path" || {
+            print_status "error" "Gagal set ownership ke $qemu_user:$qemu_group"
+            return 1
+        }
+        sudo chmod 0755 "$pool_path"
+        
+        print_status "info" "✓ Ownership set to $qemu_user:$qemu_group"
+    fi
+
+    # Fix permissions untuk semua file yang ada
+    print_status "info" "Memperbaiki permissions file volume..."
+    shopt -s nullglob
+    for file in "$pool_path"/*.qcow2 "$pool_path"/*.iso; do
+        if [[ -f "$file" ]]; then
+            print_status "info" "  Fixing: $(basename "$file")"
+            
+            if [[ "$qemu_user" == "root" ]]; then
+                sudo chown root:root "$file"
+                sudo chmod 0644 "$file"
+            else
+                sudo chown "$qemu_user:$qemu_group" "$file"
+                sudo chmod 0640 "$file"
+            fi
+        fi
+    done
+    shopt -u nullglob
+
+    if have_command setfacl; then
+        sudo chmod g+s "$pool_path" >>"$LOG_FILE" 2>&1 || true
+        sudo setfacl -m "u:${qemu_user}:rwx" -m "g:${qemu_group}:rwx" "$pool_path" >>"$LOG_FILE" 2>&1 || true
+        sudo setfacl -d -m "u:${qemu_user}:rwX" -d -m "g:${qemu_group}:rwX" "$pool_path" >>"$LOG_FILE" 2>&1 || true
+    fi
+
+    {
+        echo "Libvirt pool permission audit (after fix):"
+        stat -c "  %A %a %U:%G %n" /var/lib/libvirt /var/lib/libvirt/images "$pool_path" 2>/dev/null || true
+        sudo find "$pool_path" -maxdepth 1 -type f \( -name '*.qcow2' -o -name '*.iso' \) -printf "  %M %m %u:%g %p\n" 2>/dev/null | head -n 40 || true
+    } >>"$LOG_FILE" 2>&1
+
+    # Verify permissions
+    print_status "info" "Verifikasi permissions:"
+    ls -lah "$pool_path" | head -n 10 | tee -a "$LOG_FILE"
+    
+    # Nonaktifkan SELinux sementara jika aktif (untuk troubleshooting)
+    if command -v getenforce >/dev/null 2>&1; then
+        local selinux_status=$(getenforce 2>/dev/null || echo "Disabled")
+        if [[ "$selinux_status" == "Enforcing" ]]; then
+            print_status "info" "SELinux Enforcing terdeteksi, memperbaiki context..."
+            
+            sudo semanage fcontext -a -t virt_image_t "$pool_path(/.*)?" 2>/dev/null || {
+                print_status "warn" "Gagal set SELinux fcontext (mungkin sudah ada)"
+            }
+            
+            sudo restorecon -Rv "$pool_path" 2>&1 | tee -a "$LOG_FILE"
+            
+            print_status "info" "SELinux context:"
+            ls -Z "$pool_path" | head -n 5 | tee -a "$LOG_FILE"
+        fi
+    fi
+    
+    # Check AppArmor (Ubuntu/Debian)
+    if command -v aa-status >/dev/null 2>&1; then
+        if sudo aa-status 2>/dev/null | grep -q "libvirtd"; then
+            print_status "info" "AppArmor terdeteksi, memperbaiki profile..."
+            
+            local apparmor_local="/etc/apparmor.d/local/abstractions/libvirt-qemu"
+            sudo mkdir -p "$(dirname "$apparmor_local")" 2>/dev/null || true
+            sudo touch "$apparmor_local" 2>/dev/null || true
+            if ! sudo grep -q "$pool_path" "$apparmor_local" 2>/dev/null; then
+                print_status "info" "Menambahkan rule AppArmor..."
+                echo "  # Custom pool path for k3s_infra_pool" | sudo tee -a "$apparmor_local" >/dev/null
+                echo "  \"$pool_path/\" r," | sudo tee -a "$apparmor_local" >/dev/null
+                echo "  \"$pool_path/**\" rwk," | sudo tee -a "$apparmor_local" >/dev/null
+
+                sudo systemctl reload apparmor 2>/dev/null || true
+                print_status "success" "AppArmor profile updated"
+            fi
+        fi
+    fi
+    
+    print_status "success" "Permission fixes selesai"
+    return 0
+}
+
+# Fungsi: Pre-create and Fix Base Image Volume
+precreate_and_fix_base_image_volume() {
+    print_status "info" "Mempersiapkan base image volume dengan permissions yang benar..."
+    
+    local pool_name="k3s_infra_pool"
+    local pool_path="/var/lib/libvirt/images/${pool_name}"
+    local base_vol_name="ubuntu-base-img"
+    
+    # Jalankan precreate yang sudah ada
+    precreate_base_image_volume
+    
+    if libvirt_uri_is_remote; then
+        return 0
+    fi
+    
+    local qemu_user
+    local qemu_group
+    qemu_user=$(detect_qemu_user)
+    qemu_group=$(detect_qemu_group)
+
+    # Cari semua base image volumes dan fix permissions
+    print_status "info" "Memperbaiki permissions untuk base image volumes..."
+    
+    shopt -s nullglob
+    for img in "$pool_path"/ubuntu-base-img*.qcow2; do
+        if [[ -f "$img" ]]; then
+            print_status "info" "  Fixing: $(basename "$img")"
+            sudo chown "$qemu_user:$qemu_group" "$img" 2>/dev/null || true
+            sudo chmod 0640 "$img" 2>/dev/null || true
+        fi
+    done
+    shopt -u nullglob
+    
+    print_status "success" "Base image volume permissions fixed"
+    return 0
+}
+
 # Fungsi: Verify Network Connectivity for Image Download
 verify_network_for_download() {
     print_status "info" "Verifying network connectivity for image download..."
@@ -407,6 +816,423 @@ verify_network_for_download() {
     fi
     
     return 0
+}
+
+have_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+sudo_can_run() {
+    if ! have_command sudo; then
+        return 1
+    fi
+    sudo -n true >/dev/null 2>&1
+}
+
+ensure_sudo_ready() {
+    if ! have_command sudo; then
+        return 1
+    fi
+    if sudo -n true >/dev/null 2>&1; then
+        return 0
+    fi
+    print_status "warn" "Dependency install membutuhkan sudo. Anda mungkin diminta memasukkan password."
+    sudo true
+}
+
+ensure_apparmor_virt_aa_helper_can_write_files() {
+    if [[ ! -f "/etc/apparmor.d/usr.lib.libvirt.virt-aa-helper" ]]; then
+        return 0
+    fi
+
+    local local_override="/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper"
+    local needed_rule="/etc/apparmor.d/libvirt/libvirt-*.files rw,"
+
+    if [[ -f "$local_override" ]] && grep -qxF "$needed_rule" "$local_override" 2>/dev/null; then
+        return 0
+    fi
+
+    print_status "warn" "Memperbaiki AppArmor virt-aa-helper agar dapat menulis file allowlist '*.files'"
+    if ! ensure_sudo_ready; then
+        print_status "error" "Tidak dapat menjalankan sudo untuk memperbaiki AppArmor."
+        return 1
+    fi
+
+    sudo mkdir -p "/etc/apparmor.d/local" >>"$LOG_FILE" 2>&1 || true
+    printf "%s\n" "$needed_rule" | sudo tee -a "$local_override" >/dev/null 2>&1 || return 1
+
+    if have_command apparmor_parser; then
+        sudo apparmor_parser -r "/etc/apparmor.d/usr.lib.libvirt.virt-aa-helper" >>"$LOG_FILE" 2>&1 || true
+    fi
+    if have_command systemctl; then
+        sudo systemctl reload apparmor >>"$LOG_FILE" 2>&1 || true
+    fi
+
+    return 0
+}
+
+audit_libvirt_storage_path() {
+    local file_path="$1"
+    {
+        echo "Libvirt storage audit:"
+        echo "- Target: $file_path"
+        echo "- Date: $(date)"
+        echo "- namei:"
+        namei -l "$file_path" 2>&1 || true
+        echo "- stat:"
+        stat "$file_path" 2>&1 || true
+        if have_command getfacl; then
+            echo "- getfacl:"
+            getfacl -p "$(dirname "$file_path")" "$file_path" 2>&1 || true
+        fi
+        if have_command aa-status; then
+            echo "- aa-status (summary):"
+            aa-status 2>&1 | head -n 60 || true
+        fi
+        if have_command getenforce; then
+            echo "- SELinux (getenforce):"
+            getenforce 2>&1 || true
+        fi
+        if have_command ls; then
+            echo "- SELinux context (ls -Z) if available:"
+            ls -Z "$(dirname "$file_path")" "$file_path" 2>&1 | head -n 10 || true
+        fi
+        if have_command journalctl; then
+            echo "- Kernel denies (journalctl -k | DENIED|apparmor|selinux):"
+            journalctl -k -n 200 2>/dev/null | grep -iE "denied|apparmor|selinux" | tail -n 80 || true
+        fi
+    } >>"$LOG_FILE" 2>&1 || true
+}
+
+fix_libvirt_storage_permissions() {
+    local pool_dir="/var/lib/libvirt/images/k3s_infra_pool"
+    local qemu_user
+    local qemu_group
+    qemu_user=$(detect_qemu_user)
+    qemu_group=$(detect_qemu_group)
+
+    if ! ensure_sudo_ready; then
+        return 1
+    fi
+
+    sudo chown root:root /var/lib/libvirt >>"$LOG_FILE" 2>&1 || true
+    sudo chown root:root /var/lib/libvirt/images >>"$LOG_FILE" 2>&1 || true
+    sudo chmod 0711 /var/lib/libvirt >>"$LOG_FILE" 2>&1 || true
+    sudo chmod 0711 /var/lib/libvirt/images >>"$LOG_FILE" 2>&1 || true
+
+    sudo chown "$qemu_user":"$qemu_group" "$pool_dir" >>"$LOG_FILE" 2>&1 || true
+    sudo chmod 0755 "$pool_dir" >>"$LOG_FILE" 2>&1 || true
+
+    if have_command setfacl; then
+        sudo chmod g+s "$pool_dir" >>"$LOG_FILE" 2>&1 || true
+        sudo setfacl -m "u:${qemu_user}:rwx" -m "g:${qemu_group}:rwx" "$pool_dir" >>"$LOG_FILE" 2>&1 || true
+        sudo setfacl -d -m "u:${qemu_user}:rwX" -d -m "g:${qemu_group}:rwX" "$pool_dir" >>"$LOG_FILE" 2>&1 || true
+    fi
+
+    sudo find "$pool_dir" -maxdepth 1 -type f -name '*.qcow2' -exec chown "$qemu_user":"$qemu_group" {} + >>"$LOG_FILE" 2>&1 || true
+    sudo find "$pool_dir" -maxdepth 1 -type f -name '*.iso' -exec chown "$qemu_user":"$qemu_group" {} + >>"$LOG_FILE" 2>&1 || true
+    sudo find "$pool_dir" -maxdepth 1 -type f -name '*.qcow2' -exec chmod 0640 {} + >>"$LOG_FILE" 2>&1 || true
+    sudo find "$pool_dir" -maxdepth 1 -type f -name '*.iso' -exec chmod 0640 {} + >>"$LOG_FILE" 2>&1 || true
+
+    return 0
+}
+
+infer_domain_name_from_storage_path() {
+    local p="$1"
+    local b
+    b=$(basename "$p" 2>/dev/null || true)
+    if [[ "$b" =~ ^ubuntu-base-img-(.+)\.qcow2$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ "$b" =~ ^ubuntu-disk-(.+)\.qcow2$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    echo ""
+    return 0
+}
+
+cleanup_libvirt_domain_if_safe() {
+    local domain_name="$1"
+    local expected_prefix="/var/lib/libvirt/images/k3s_infra_pool/"
+
+    if [[ -z "$domain_name" ]]; then
+        return 1
+    fi
+    if ! ensure_sudo_ready; then
+        return 1
+    fi
+    if ! sudo virsh -c qemu:///system dominfo "$domain_name" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local disk_path=""
+    disk_path=$(sudo virsh -c qemu:///system dumpxml "$domain_name" 2>/dev/null | awk -F"'" '/<source file=/{print $2; exit}' || true)
+    if [[ -n "$disk_path" ]] && [[ "$disk_path" != ${expected_prefix}* ]]; then
+        print_status "error" "Refusing to cleanup domain '$domain_name' (disk path not in expected pool): $disk_path"
+        return 1
+    fi
+
+    print_status "warn" "Cleaning up libvirt domain '$domain_name' to allow retry"
+    sudo virsh -c qemu:///system destroy "$domain_name" >/dev/null 2>&1 || true
+    sudo virsh -c qemu:///system undefine "$domain_name" --managed-save --nvram --snapshots-metadata >>"$LOG_FILE" 2>&1 || sudo virsh -c qemu:///system undefine "$domain_name" >>"$LOG_FILE" 2>&1 || true
+    return 0
+}
+
+install_packages() {
+    local pkgs=("$@")
+    if [[ ${#pkgs[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    if have_command apt-get; then
+        sudo apt-get update -y >>"$LOG_FILE" 2>&1 || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+    if have_command dnf; then
+        sudo dnf install -y "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+    if have_command yum; then
+        sudo yum install -y "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+    if have_command zypper; then
+        sudo zypper --non-interactive install -y "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+    if have_command pacman; then
+        sudo pacman -Sy --noconfirm "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+    if have_command apk; then
+        sudo apk add --no-cache "${pkgs[@]}" >>"$LOG_FILE" 2>&1
+        return $?
+    fi
+
+    return 2
+}
+
+ensure_mkisofs_available() {
+    if have_command mkisofs; then
+        return 0
+    fi
+
+    if have_command genisoimage; then
+        sudo ln -sf "$(command -v genisoimage)" /usr/local/bin/mkisofs >>"$LOG_FILE" 2>&1 || true
+        hash -r 2>/dev/null || true
+        have_command mkisofs && return 0
+    fi
+
+    if have_command xorrisofs; then
+        sudo ln -sf "$(command -v xorrisofs)" /usr/local/bin/mkisofs >>"$LOG_FILE" 2>&1 || true
+        hash -r 2>/dev/null || true
+        have_command mkisofs && return 0
+    fi
+
+    if have_command xorriso; then
+        sudo ln -sf "$(command -v xorriso)" /usr/local/bin/mkisofs >>"$LOG_FILE" 2>&1 || true
+        hash -r 2>/dev/null || true
+        have_command mkisofs && return 0
+    fi
+
+    return 1
+}
+
+ensure_iso_tools() {
+    if have_command mkisofs; then
+        return 0
+    fi
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        print_status "warn" "mkisofs tidak ditemukan. Terraform apply akan gagal saat membuat cloud-init ISO."
+        return 0
+    fi
+
+    print_status "warn" "mkisofs tidak ditemukan. Menyiapkan dependency untuk pembuatan cloud-init ISO..."
+
+    if ! ensure_sudo_ready; then
+        print_status "error" "Tidak dapat menjalankan sudo untuk install dependency (mkisofs/genisoimage)."
+        print_status "info" "Install manual (Debian/Ubuntu): sudo apt-get update && sudo apt-get install -y genisoimage"
+        print_status "info" "Lalu (jika mkisofs masih tidak ada): sudo ln -sf /usr/bin/genisoimage /usr/local/bin/mkisofs"
+        return 1
+    fi
+
+    if have_command apt-get; then
+        install_packages genisoimage || install_packages xorriso || true
+    elif have_command dnf || have_command yum; then
+        install_packages genisoimage || install_packages cdrtools || install_packages xorriso || true
+    elif have_command zypper; then
+        install_packages genisoimage || install_packages cdrtools || install_packages xorriso || true
+    elif have_command pacman; then
+        install_packages cdrtools || install_packages libisoburn || true
+    elif have_command apk; then
+        install_packages cdrkit || install_packages xorriso || true
+    else
+        print_status "error" "Package manager tidak dikenali. Install mkisofs/genisoimage secara manual."
+        return 1
+    fi
+
+    ensure_mkisofs_available
+    if ! have_command mkisofs; then
+        print_status "error" "mkisofs masih tidak tersedia setelah instalasi dependency."
+        return 1
+    fi
+
+    mkisofs --version >>"$LOG_FILE" 2>&1 || true
+    print_status "success" "mkisofs tersedia: $(command -v mkisofs)"
+    return 0
+}
+
+recover_libvirt_domain_exists() {
+    local domain_name="$1"
+    local addr="module.kvm_ubuntu.libvirt_domain.ubuntu_vm"
+
+    if terraform state list 2>/dev/null | grep -qx "$addr"; then
+        return 0
+    fi
+
+    if ! ensure_sudo_ready; then
+        return 1
+    fi
+
+    if ! sudo virsh -c qemu:///system dominfo "$domain_name" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local disk_path=""
+    disk_path=$(sudo virsh -c qemu:///system dumpxml "$domain_name" 2>/dev/null | awk -F"'" '/<source file=/{print $2; exit}' || true)
+    if [[ -n "$disk_path" ]] && [[ "$disk_path" != /var/lib/libvirt/images/k3s_infra_pool/* ]]; then
+        print_status "error" "Refusing to modify existing domain '$domain_name' (disk path not in expected pool): $disk_path"
+        return 1
+    fi
+
+    print_status "warn" "Domain '$domain_name' exists but not tracked in Terraform state. Cleaning up to allow retry..."
+    sudo virsh -c qemu:///system destroy "$domain_name" >/dev/null 2>&1 || true
+    sudo virsh -c qemu:///system undefine "$domain_name" --managed-save --nvram --snapshots-metadata >>"$LOG_FILE" 2>&1 || sudo virsh -c qemu:///system undefine "$domain_name" >>"$LOG_FILE" 2>&1 || true
+
+    return 0
+}
+
+http_head_with_retry() {
+    local url="$1"
+    local retries="${2:-3}"
+    local timeout_seconds="${3:-15}"
+
+    local attempt=1
+    while [[ $attempt -le $retries ]]; do
+        if have_command curl; then
+            if curl -fsSIL --connect-timeout "$timeout_seconds" --max-time "$timeout_seconds" "$url" >/dev/null 2>&1; then
+                return 0
+            fi
+        elif have_command wget; then
+            if wget --spider -q -T "$timeout_seconds" "$url" >/dev/null 2>&1; then
+                return 0
+            fi
+        else
+            return 2
+        fi
+
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+
+    return 1
+}
+
+verify_terraform_provider_connectivity() {
+    print_status "info" "Checking Terraform provider registry connectivity..."
+
+    if ! have_command curl && ! have_command wget; then
+        print_status "warn" "curl/wget not found. Skipping HTTPS connectivity checks for Terraform providers."
+        return 0
+    fi
+
+    local registry_url="https://registry.terraform.io/.well-known/terraform.json"
+    local github_url="https://github.com"
+    local libvirt_sha_url="https://github.com/dmacvicar/terraform-provider-libvirt/releases/download/v0.7.6/terraform-provider-libvirt_0.7.6_SHA256SUMS"
+
+    local ok=true
+
+    if ! http_head_with_retry "$registry_url" "$TF_PROVIDER_NET_RETRIES" "$TF_PROVIDER_NET_TIMEOUT_SECONDS"; then
+        print_status "warn" "Cannot reach registry.terraform.io over HTTPS (provider discovery may fail)."
+        ok=false
+    else
+        print_status "info" "✓ registry.terraform.io reachable"
+    fi
+
+    if ! http_head_with_retry "$github_url" "$TF_PROVIDER_NET_RETRIES" "$TF_PROVIDER_NET_TIMEOUT_SECONDS"; then
+        print_status "warn" "Cannot reach github.com over HTTPS (community provider checksum fetch may fail)."
+        ok=false
+    else
+        print_status "info" "✓ github.com reachable"
+    fi
+
+    if ! http_head_with_retry "$libvirt_sha_url" "$TF_PROVIDER_NET_RETRIES" "$TF_PROVIDER_NET_TIMEOUT_SECONDS"; then
+        print_status "warn" "Cannot reach libvirt provider checksum URL (install may timeout)."
+        ok=false
+    else
+        print_status "info" "✓ libvirt checksum URL reachable"
+    fi
+
+    if [[ "$ok" == "true" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+setup_terraform_runtime() {
+    export TF_REGISTRY_CLIENT_TIMEOUT
+    export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${PROJECT_ROOT}/.terraform.d/plugin-cache}"
+    mkdir -p "$TF_PLUGIN_CACHE_DIR" 2>/dev/null || true
+    chmod 700 "$TF_PLUGIN_CACHE_DIR" 2>/dev/null || true
+
+    {
+        echo "Terraform runtime env:"
+        echo "- TF_REGISTRY_CLIENT_TIMEOUT=${TF_REGISTRY_CLIENT_TIMEOUT}"
+        echo "- TF_PLUGIN_CACHE_DIR=${TF_PLUGIN_CACHE_DIR}"
+        echo "- HTTP_PROXY set: $([[ -n \"${HTTP_PROXY:-}\" ]] && echo yes || echo no)"
+        echo "- HTTPS_PROXY set: $([[ -n \"${HTTPS_PROXY:-}\" ]] && echo yes || echo no)"
+        echo "- NO_PROXY set: $([[ -n \"${NO_PROXY:-}\" ]] && echo yes || echo no)"
+    } >>"$LOG_FILE" 2>&1 || true
+}
+
+is_transient_provider_install_error() {
+    local excerpt
+    excerpt="$(tail -n 250 "$LOG_FILE" 2>/dev/null || true)"
+
+    if echo "$excerpt" | grep -qiE "context deadline exceeded|TLS handshake timeout|i/o timeout|timeout|timed out|connection reset|temporary failure|network is unreachable|no route to host|EOF|502|503|504|429"; then
+        return 0
+    fi
+    return 1
+}
+
+terraform_init_with_retry() {
+    local upgrade_flag=""
+    if [[ "${TF_INIT_UPGRADE}" == "true" ]]; then
+        upgrade_flag="-upgrade"
+    fi
+
+    local attempt=1
+    while [[ $attempt -le $TF_INIT_RETRIES ]]; do
+        if terraform init -input=false $upgrade_flag >>"$LOG_FILE" 2>&1; then
+            return 0
+        fi
+
+        local exit_code=$?
+        if is_transient_provider_install_error && [[ $attempt -lt $TF_INIT_RETRIES ]]; then
+            print_status "warn" "Terraform init gagal (kemungkinan network/transient). Retry $attempt/$TF_INIT_RETRIES..."
+            sleep $((attempt * 5))
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        return "$exit_code"
+    done
+
+    return 1
 }
 
 # Fungsi: Rotasi Log
@@ -872,6 +1698,8 @@ validate_ssh_authentication() {
 comprehensive_preflight_checks() {
     print_status "step" "Comprehensive Pre-flight Checks"
     
+    export PREFLIGHT_CRITICAL_FAILURE=false
+
     local checks_passed=true
     local sudo_noninteractive_ok=true
     if [[ "${DRY_RUN:-false}" == "true" ]] && ! sudo -n true >/dev/null 2>&1; then
@@ -923,11 +1751,25 @@ comprehensive_preflight_checks() {
     else
         print_status "warn" "Network connectivity issue detected"
     fi
+
+    verify_terraform_provider_connectivity || true
     
     # 4. Terraform Version
     print_status "info" "Checking Terraform version..."
     local tf_version=$(terraform version 2>/dev/null | head -n1 | awk '{print $2}' || echo "unknown")
     print_status "info" "✓ Terraform version: $tf_version"
+
+    if ! ensure_iso_tools; then
+        export PREFLIGHT_CRITICAL_FAILURE=true
+        print_status "error" "Critical pre-flight check failed"
+        return 1
+    fi
+
+    if ! ensure_apparmor_virt_aa_helper_can_write_files; then
+        export PREFLIGHT_CRITICAL_FAILURE=true
+        print_status "error" "Critical pre-flight check failed"
+        return 1
+    fi
     
     # 5. Required Terraform Providers
     print_status "info" "Checking Terraform providers..."
@@ -946,9 +1788,10 @@ comprehensive_preflight_checks() {
         
         # 8. NEW: Ensure pool is ready for volume creation
         ensure_pool_ready_for_volumes || checks_passed=false
+        fix_volume_permissions || checks_passed=false
         
         # 9. NEW: Pre-check base image volume
-        precreate_base_image_volume || checks_passed=false
+        precreate_and_fix_base_image_volume || checks_passed=false
     fi
     
     # 10. NEW: Verify network connectivity
@@ -961,14 +1804,13 @@ comprehensive_preflight_checks() {
     verify_kubeconfig_status || checks_passed=false
     verify_kubernetes_apiserver_status || checks_passed=false
     
-    # Final verdict
     if [[ "$checks_passed" == "true" ]]; then
         print_status "success" "All pre-flight checks passed ✓"
         return 0
-    else
-        print_status "warn" "Some pre-flight checks completed with warnings"
-        return 0
     fi
+
+    print_status "warn" "Some pre-flight checks completed with warnings"
+    return 0
 }
 
 # Fungsi: Post-deployment Verification
@@ -1455,27 +2297,48 @@ wait_for_n8n_pods_ready() {
 classify_terraform_apply_failure() {
     local log_file="$1"
 
-    if grep -q "timeout while waiting for state to become 'EXISTS'" "$log_file"; then
+    local recent=""
+    recent=$(awk '{a[NR]=$0} /Apply attempt [0-9]+\/[0-9]+/{p=NR} END{if(p==0)p=1; for(i=p;i<=NR;i++) print a[i]}' "$log_file" 2>/dev/null || true)
+    if [[ -z "$recent" ]]; then
+        recent=$(tail -n 400 "$log_file" 2>/dev/null || true)
+    fi
+
+    if echo "$recent" | grep -q 'exec: "mkisofs": executable file not found in \$PATH' || echo "$recent" | grep -qiE 'mkisofs.*(not found|not in \$PATH)'; then
+        echo "mkisofs_missing"
+        return 0
+    fi
+
+    if echo "$recent" | grep -qiE "qemu-system-.*Could not open '.*\.qcow2': Permission denied|Could not open '.*\.qcow2': Permission denied"; then
+        echo "libvirt_image_permission_denied"
+        return 0
+    fi
+
+    if echo "$recent" | grep -qiE "domain '.*' already exists with uuid"; then
+        echo "libvirt_domain_exists"
+        return 0
+    fi
+
+    if echo "$recent" | grep -q "timeout while waiting for state to become 'EXISTS'"; then
         echo "volume_timeout"
         return 0
     fi
 
-    if grep -q "exists already" "$log_file" && grep -q "libvirt_cloudinit_disk" "$log_file"; then
+    if echo "$recent" | grep -q "exists already" && echo "$recent" | grep -q "libvirt_cloudinit_disk"; then
         echo "cloudinit_exists"
         return 0
     fi
 
-    if grep -q "Apply failed with 1 conflict" "$log_file" && grep -q "conflict" "$log_file"; then
+    if echo "$recent" | grep -q "Apply failed with 1 conflict" && echo "$recent" | grep -q "conflict"; then
         echo "k8s_ssa_conflict"
         return 0
     fi
 
-    if grep -q "no domain with matching uuid" "$log_file" || grep -q "retrieving libvirt domain by delete" "$log_file"; then
+    if echo "$recent" | grep -q "no domain with matching uuid" || echo "$recent" | grep -q "retrieving libvirt domain by delete"; then
         echo "libvirt_domain_uuid_stale"
         return 0
     fi
 
-    if grep -q "already exists" "$log_file"; then
+    if echo "$recent" | grep -q "already exists"; then
         echo "resource_exists"
         return 0
     fi
@@ -1541,6 +2404,38 @@ terraform_apply_with_retry() {
                 failure_kind=$(classify_terraform_apply_failure "$LOG_FILE")
 
                 case "$failure_kind" in
+                    mkisofs_missing)
+                        print_status "error" "Dependency mkisofs tidak tersedia untuk membuat cloud-init ISO"
+                        if ! ensure_iso_tools; then
+                            print_status "error" "Gagal menyiapkan mkisofs. Hentikan retry karena tidak akan berhasil tanpa dependency."
+                            return 1
+                        fi
+                        sleep 2
+                        ;;
+
+                    libvirt_image_permission_denied)
+                        print_status "error" "Detected permission denied saat QEMU membuka disk image"
+                        local backing=""
+                        backing=$(grep -oE "/var/lib/libvirt/images/[^']+\.qcow2" "$LOG_FILE" | tail -n 1 || true)
+                        if [[ -n "$backing" ]]; then
+                            audit_libvirt_storage_path "$backing"
+                        fi
+                        local inferred_domain=""
+                        inferred_domain=$(infer_domain_name_from_storage_path "$backing" || true)
+                        cleanup_libvirt_domain_if_safe "$inferred_domain" || true
+                        ensure_apparmor_virt_aa_helper_can_write_files || true
+                        fix_libvirt_storage_permissions || true
+                        sleep 5
+                        ;;
+
+                    libvirt_domain_exists)
+                        print_status "warn" "Detected libvirt domain already exists"
+                        local domain_name=""
+                        domain_name=$(grep -oE "domain '[^']+' already exists" "$LOG_FILE" | tail -n 1 | sed -E "s/^domain '([^']+)'.*/\1/" || true)
+                        [[ -z "$domain_name" ]] && domain_name="k3s-master-01"
+                        recover_libvirt_domain_exists "$domain_name" || true
+                        sleep 3
+                        ;;
                     volume_timeout)
                         print_status "warn" "Detected volume creation timeout"
                         print_status "info" "Cleaning up partial resources..."
@@ -1804,15 +2699,29 @@ backup_terraform_state() {
     
     if [[ -f "$PROJECT_ROOT/terraform.tfstate" ]]; then
         print_status "info" "Backing up Terraform state..."
-        mkdir -p "$backup_dir"
-        cp "$PROJECT_ROOT/terraform.tfstate" "$backup_file"
-        print_status "success" "State backed up to: $backup_file"
+
+        if ! mkdir -p "$backup_dir" >>"$LOG_FILE" 2>&1; then
+            backup_dir="/tmp/terraform-backups"
+            backup_file="${backup_dir}/terraform.tfstate.backup-${TIMESTAMP}"
+            mkdir -p "$backup_dir" >>"$LOG_FILE" 2>&1 || true
+        fi
+
+        if cp "$PROJECT_ROOT/terraform.tfstate" "$backup_file" >>"$LOG_FILE" 2>&1; then
+            print_status "success" "State backed up to: $backup_file"
+        else
+            print_status "warn" "State backup failed (non-critical). Continuing."
+            return 0
+        fi
         
         # Keep only last 10 backups
-        local backup_count=$(ls -1 "$backup_dir"/terraform.tfstate.backup-* 2>/dev/null | wc -l)
+        local backup_count=$(ls -1 "$backup_dir"/terraform.tfstate.backup-* 2>/dev/null | wc -l | tr -d ' ')
         if [[ $backup_count -gt 10 ]]; then
             print_status "info" "Cleaning old backups (keeping last 10)..."
-            ls -1t "$backup_dir"/terraform.tfstate.backup-* | tail -n +11 | xargs rm -f
+            local old_list
+            old_list=$(ls -1t "$backup_dir"/terraform.tfstate.backup-* 2>/dev/null | tail -n +11 || true)
+            if [[ -n "$old_list" ]]; then
+                printf "%s\n" "$old_list" | xargs rm -f >>"$LOG_FILE" 2>&1 || true
+            fi
         fi
     else
         print_status "warn" "No state file to backup"
@@ -1853,6 +2762,16 @@ check_for_updates() {
 # Fungsi: Validate Environment Variables
 validate_environment() {
     print_status "info" "Validating environment variables..."
+
+    if [[ -f "$VAR_FILE" ]]; then
+        local tfvars_libvirt_uri=""
+        tfvars_libvirt_uri="$(awk -F'=' '/^[[:space:]]*libvirt_uri[[:space:]]*=/{gsub(/^[[:space:]]+/,"",$2); gsub(/[[:space:]]+$/,"",$2); gsub(/"/,"",$2); print $2; exit}' "$VAR_FILE" 2>/dev/null || true)"
+        if [[ -n "$tfvars_libvirt_uri" ]] && [[ "${LIBVIRT_DEFAULT_URI:-qemu:///system}" == "qemu:///system" ]]; then
+            export LIBVIRT_DEFAULT_URI="$tfvars_libvirt_uri"
+        fi
+    fi
+
+    export TF_VAR_libvirt_uri="${TF_VAR_libvirt_uri:-${LIBVIRT_DEFAULT_URI:-qemu:///system}}"
 
     # Daftar variabel yang diperlukan
     local required_vars=("LIBVIRT_DEFAULT_URI")
@@ -2056,6 +2975,11 @@ main() {
     print_status "step" "Running comprehensive pre-flight checks..."
     if ! comprehensive_preflight_checks; then
         print_status "error" "Pre-flight checks failed"
+
+        if [[ "${PREFLIGHT_CRITICAL_FAILURE:-false}" == "true" ]]; then
+            handle_error 1 "Pre-flight Checks"
+        fi
+
         if [[ "${FORCE_MODE:-false}" == "true" ]] || [[ "${DRY_RUN:-false}" == "true" ]]; then
             print_status "warn" "Continuing despite failed pre-flight checks due to --force/--dry-run"
         else
@@ -2070,8 +2994,22 @@ main() {
     # Step 1: Terraform Init
     local step_start=$(date +%s)
     print_status "step" "Inisialisasi Terraform..."
+
+    setup_terraform_runtime
+
+    if ! verify_terraform_provider_connectivity; then
+        print_status "warn" "Konektivitas ke registry/provider checksum tidak stabil. Terraform init berpotensi gagal."
+        if [[ "${FORCE_MODE:-false}" == "true" ]] || [[ "${DRY_RUN:-false}" == "true" ]]; then
+            print_status "warn" "Melanjutkan karena --force/--dry-run"
+        else
+            read -p "Lanjutkan terraform init? (yes/no): " -r
+            if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+                handle_error 1 "Terraform Provider Connectivity"
+            fi
+        fi
+    fi
     
-    if terraform init -input=false -upgrade >> "$LOG_FILE" 2>&1; then
+    if terraform_init_with_retry; then
         print_status "success" "Terraform initialized successfully"
     else
         handle_error $? "Terraform Init"
@@ -2485,7 +3423,6 @@ fix_vm_network_issues() {
         return 0
     fi
 }
-
 
 # Fungsi: Enhanced IP Retrieval with Multiple Methods
 get_vm_ip_address() {

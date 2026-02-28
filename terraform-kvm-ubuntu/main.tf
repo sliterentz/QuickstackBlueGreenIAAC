@@ -3013,7 +3013,7 @@ resource "null_resource" "deployment_summary" {
       echo ""
       
       # Save summary to a dedicated file
-      SUMMARY_FILE="${path.root}/deployment-summary-${local.sanitized_hostname}.txt"
+      SUMMARY_FILE="${path.root}/logs/deployment-summary-${local.sanitized_hostname}.txt"
       cat > "$SUMMARY_FILE" << 'SUMMARY'
 ╔════════════════════════════════════════════════════════════════╗
 ║           VM DEPLOYMENT SUMMARY                                ║
@@ -3098,7 +3098,7 @@ resource "null_resource" "cleanup_on_destroy" {
       fi
       
       # Clean up summary file
-      SUMMARY_FILE="${path.root}/deployment-summary-${self.triggers.hostname}.txt"
+      SUMMARY_FILE="${path.root}/log/deployment-summary-${self.triggers.hostname}.txt"
       if [ -f "$SUMMARY_FILE" ]; then
         echo "Removing deployment summary..."
         rm -f "$SUMMARY_FILE"
